@@ -2,3 +2,5 @@
 backend/.env
 .DS_Store
 Thumbs.db
+
+backend/.env
