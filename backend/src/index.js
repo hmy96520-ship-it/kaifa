@@ -1,0 +1,348 @@
+﻿import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { pool } from "./db.js";
+import { generateQuestionsFromJd, normalizeJdPayload, evaluateInterview } from "./domain.js";
+
+dotenv.config();
+
+const app = express();
+const port = Number(process.env.PORT || 3001);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const publicDir = path.resolve(__dirname, "..", "public");
+
+function asyncHandler(fn) {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
+
+function safeJsonArray(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return [];
+
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => String(item).trim()).filter(Boolean);
+      }
+    } catch {
+      return text
+        .split(/[，,]/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+
+    return [];
+  }
+
+  return [];
+}
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static(publicDir));
+
+app.get(
+  "/api/health",
+  asyncHandler(async (_req, res) => {
+    const [rows] = await pool.query("SELECT 1 AS ok");
+    res.json({ ok: true, db: rows[0].ok === 1 });
+  }),
+);
+
+app.post(
+  "/api/jobs",
+  asyncHandler(async (req, res) => {
+    const normalized = normalizeJdPayload(req.body || {});
+    if (!normalized.ok) {
+      res.status(400).json({ ok: false, message: normalized.message });
+      return;
+    }
+
+    const jd = normalized.value;
+    const [result] = await pool.execute(
+      `INSERT INTO job_post (title, must_skills, nice_skills, responsibilities)
+       VALUES (?, ?, ?, ?)`,
+      [jd.title, JSON.stringify(jd.mustSkills), JSON.stringify(jd.niceSkills), jd.responsibilities],
+    );
+
+    res.status(201).json({ ok: true, jobId: result.insertId, jd });
+  }),
+);
+
+app.post(
+  "/api/jobs/:jobId/questions/generate",
+  asyncHandler(async (req, res) => {
+    const jobId = Number(req.params.jobId);
+    if (!jobId) {
+      res.status(400).json({ ok: false, message: "invalid jobId" });
+      return;
+    }
+
+    const [rows] = await pool.execute("SELECT * FROM job_post WHERE id = ?", [jobId]);
+    if (!rows.length) {
+      res.status(404).json({ ok: false, message: "job not found" });
+      return;
+    }
+
+    const job = rows[0];
+    const jd = {
+      title: String(job.title || "").trim(),
+      responsibilities: String(job.responsibilities || "").trim(),
+      mustSkills: safeJsonArray(job.must_skills),
+      niceSkills: safeJsonArray(job.nice_skills),
+    };
+
+    const questions = generateQuestionsFromJd(jd);
+
+    await pool.execute("DELETE FROM question_bank WHERE job_post_id = ?", [jobId]);
+    for (const item of questions) {
+      await pool.execute(
+        `INSERT INTO question_bank (job_post_id, category, question_text, focus, rubric)
+         VALUES (?, ?, ?, ?, ?)`,
+        [jobId, item.category, item.questionText, item.focus, item.rubric],
+      );
+    }
+
+    res.json({ ok: true, count: questions.length, questions });
+  }),
+);
+
+app.get(
+  "/api/jobs/:jobId/questions",
+  asyncHandler(async (req, res) => {
+    const jobId = Number(req.params.jobId);
+    if (!jobId) {
+      res.status(400).json({ ok: false, message: "invalid jobId" });
+      return;
+    }
+
+    const [rows] = await pool.execute(
+      `SELECT id, category, question_text AS questionText, focus, rubric, created_at AS createdAt
+       FROM question_bank
+       WHERE job_post_id = ?
+       ORDER BY id ASC`,
+      [jobId],
+    );
+
+    res.json({ ok: true, questions: rows });
+  }),
+);
+
+app.post(
+  "/api/interviews",
+  asyncHandler(async (req, res) => {
+    const jobId = Number(req.body?.jobId);
+    const candidateName = String(req.body?.candidateName || "").trim();
+    const interviewerName = String(req.body?.interviewerName || "").trim();
+
+    if (!jobId || !candidateName) {
+      res.status(400).json({ ok: false, message: "jobId and candidateName are required" });
+      return;
+    }
+
+    const [result] = await pool.execute(
+      `INSERT INTO interview_session (job_post_id, candidate_name, interviewer_name)
+       VALUES (?, ?, ?)`,
+      [jobId, candidateName, interviewerName || null],
+    );
+
+    res.status(201).json({ ok: true, interviewId: result.insertId });
+  }),
+);
+
+app.post(
+  "/api/interviews/:interviewId/transcripts",
+  asyncHandler(async (req, res) => {
+    const interviewId = Number(req.params.interviewId);
+    const speaker = String(req.body?.speaker || "candidate").trim();
+    const content = String(req.body?.content || "").trim();
+
+    if (!interviewId || !content) {
+      res.status(400).json({ ok: false, message: "interviewId and content are required" });
+      return;
+    }
+
+    await pool.execute(
+      `INSERT INTO transcript_segment (interview_session_id, speaker, content)
+       VALUES (?, ?, ?)`,
+      [interviewId, speaker, content],
+    );
+
+    res.status(201).json({ ok: true });
+  }),
+);
+
+app.post(
+  "/api/interviews/:interviewId/evaluate",
+  asyncHandler(async (req, res) => {
+    const interviewId = Number(req.params.interviewId);
+    if (!interviewId) {
+      res.status(400).json({ ok: false, message: "invalid interviewId" });
+      return;
+    }
+
+    const [interviewRows] = await pool.execute(
+      `SELECT i.id, i.job_post_id AS jobPostId
+       FROM interview_session i
+       WHERE i.id = ?`,
+      [interviewId],
+    );
+
+    if (!interviewRows.length) {
+      res.status(404).json({ ok: false, message: "interview not found" });
+      return;
+    }
+
+    const interview = interviewRows[0];
+
+    const [jobRows] = await pool.execute("SELECT * FROM job_post WHERE id = ?", [interview.jobPostId]);
+    if (!jobRows.length) {
+      res.status(404).json({ ok: false, message: "job not found" });
+      return;
+    }
+
+    const job = jobRows[0];
+    const jd = {
+      title: String(job.title || "").trim(),
+      responsibilities: String(job.responsibilities || "").trim(),
+      mustSkills: safeJsonArray(job.must_skills),
+      niceSkills: safeJsonArray(job.nice_skills),
+    };
+
+    const [questionRows] = await pool.execute(
+      "SELECT COUNT(1) AS count FROM question_bank WHERE job_post_id = ?",
+      [interview.jobPostId],
+    );
+
+    const [transcriptRows] = await pool.execute(
+      `SELECT content FROM transcript_segment
+       WHERE interview_session_id = ?
+       ORDER BY id ASC`,
+      [interviewId],
+    );
+
+    const transcript = transcriptRows.map((row) => row.content).join(" ").trim();
+    if (!transcript) {
+      res.status(400).json({ ok: false, message: "transcript is empty" });
+      return;
+    }
+
+    const result = evaluateInterview({
+      transcript,
+      jd,
+      questionCount: Number(questionRows[0].count || 0),
+    });
+
+    await pool.execute(
+      `INSERT INTO ai_assessment
+        (interview_session_id, total_score, suggestion, coverage_score, depth_score, communication_score, risk_score, summary, raw_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+        total_score = VALUES(total_score),
+        suggestion = VALUES(suggestion),
+        coverage_score = VALUES(coverage_score),
+        depth_score = VALUES(depth_score),
+        communication_score = VALUES(communication_score),
+        risk_score = VALUES(risk_score),
+        summary = VALUES(summary),
+        raw_json = VALUES(raw_json)`,
+      [
+        interviewId,
+        result.totalScore,
+        result.suggestion,
+        result.coverageScore,
+        result.depthScore,
+        result.communicationScore,
+        result.riskScore,
+        result.summary,
+        JSON.stringify(result),
+      ],
+    );
+
+    await pool.execute(
+      "UPDATE interview_session SET status = 'completed', ended_at = CURRENT_TIMESTAMP WHERE id = ?",
+      [interviewId],
+    );
+
+    res.json({ ok: true, assessment: result });
+  }),
+);
+
+app.get(
+  "/api/interviews/:interviewId/report",
+  asyncHandler(async (req, res) => {
+    const interviewId = Number(req.params.interviewId);
+    if (!interviewId) {
+      res.status(400).json({ ok: false, message: "invalid interviewId" });
+      return;
+    }
+
+    const [rows] = await pool.execute(
+      `SELECT
+        i.id AS interviewId,
+        i.candidate_name AS candidateName,
+        i.interviewer_name AS interviewerName,
+        i.status,
+        i.started_at AS startedAt,
+        i.ended_at AS endedAt,
+        j.id AS jobId,
+        j.title AS jobTitle,
+        a.total_score AS totalScore,
+        a.suggestion,
+        a.summary
+       FROM interview_session i
+       JOIN job_post j ON j.id = i.job_post_id
+       LEFT JOIN ai_assessment a ON a.interview_session_id = i.id
+       WHERE i.id = ?`,
+      [interviewId],
+    );
+
+    if (!rows.length) {
+      res.status(404).json({ ok: false, message: "interview not found" });
+      return;
+    }
+
+    res.json({ ok: true, report: rows[0] });
+  }),
+);
+
+app.get("*", (req, res, next) => {
+  if (req.path.startsWith("/api/")) {
+    next();
+    return;
+  }
+
+  res.sendFile(path.join(publicDir, "index.html"));
+});
+
+app.use((err, _req, res, _next) => {
+  console.error("Request failed:", err);
+  res.status(500).json({ ok: false, message: err.message || "internal error" });
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err);
+});
+
+app.listen(port, () => {
+  console.log(`Studio HR backend listening at http://localhost:${port}`);
+});
+
+
+
+
+
