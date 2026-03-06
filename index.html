@@ -105,6 +105,7 @@
         <div class="toolbar">
           <button id="evaluateBtn">生成初步评分与建议</button>
           <button id="saveBtn">保存到候选人档案</button>
+          <button id="downloadReportBtn" type="button">下载当前报告</button>
         </div>
         <div id="assessmentEmpty" class="empty">还没有评估结果。</div>
         <div id="assessmentPanel" class="hidden">
@@ -125,6 +126,10 @@
       <section class="card">
         <h2>5) 候选人档案（本地）</h2>
         <p class="hint">当前为本地浏览器存储，可后续升级为后端持久化。</p>
+        <div class="toolbar">
+          <button id="exportCsvBtn" type="button">批量导出CSV</button>
+          <button id="exportJsonBtn" type="button">批量导出JSON</button>
+        </div>
         <div id="archiveEmpty" class="empty">暂无记录。</div>
         <ul id="archiveList" class="archive-list"></ul>
       </section>
@@ -133,3 +138,6 @@
     <script src="./app.js"></script>
   </body>
 </html>
+
+
+

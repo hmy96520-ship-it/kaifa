@@ -6,6 +6,7 @@ COPY package*.json ./
 RUN npm install --omit=dev
 
 COPY src ./src
+COPY prompts ./prompts
 COPY public ./public
 
 EXPOSE 3001

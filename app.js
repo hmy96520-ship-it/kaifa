@@ -39,6 +39,7 @@ const state = {
   questions: [],
   transcript: "",
   assessment: null,
+  assessmentSource: "rule",
   lastInterviewId: null,
   recognition: null,
 };
@@ -69,6 +70,7 @@ const el = {
   appendBtn: document.getElementById("appendBtn"),
   evaluateBtn: document.getElementById("evaluateBtn"),
   saveBtn: document.getElementById("saveBtn"),
+  downloadReportBtn: document.getElementById("downloadReportBtn"),
   assessmentEmpty: document.getElementById("assessmentEmpty"),
   assessmentPanel: document.getElementById("assessmentPanel"),
   totalScore: document.getElementById("totalScore"),
@@ -77,6 +79,8 @@ const el = {
   assessmentSummary: document.getElementById("assessmentSummary"),
   archiveEmpty: document.getElementById("archiveEmpty"),
   archiveList: document.getElementById("archiveList"),
+  exportCsvBtn: document.getElementById("exportCsvBtn"),
+  exportJsonBtn: document.getElementById("exportJsonBtn"),
 };
 
 function splitByComma(text) {
@@ -244,7 +248,8 @@ async function checkBackend() {
   try {
     const health = await apiFetch("/api/health");
     if (health.ok && health.db) {
-      setBackendStatus(true, "后端：已连接");
+      const aiLabel = health.ai?.enabled ? "AI:开" : "AI:关";
+      setBackendStatus(true, `后端：已连接 (${aiLabel})`);
       return true;
     }
 
@@ -392,6 +397,144 @@ function setButtonBusy(button, busyText, idleText, busy) {
   button.textContent = busy ? busyText : idleText;
 }
 
+function sanitizeFileSegment(text) {
+  return String(text || "")
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/\s+/g, "_")
+    .slice(0, 40);
+}
+
+function buildTimestampForFile() {
+  const now = new Date();
+  const pad = (num) => String(num).padStart(2, "0");
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+function downloadFile(filename, content, mime = "text/plain;charset=utf-8") {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function escapeCsvCell(value) {
+  const text = String(value ?? "").replace(/\r?\n/g, " ");
+  if (/[",]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+async function fetchInterviewReportById(interviewId) {
+  if (!interviewId) return null;
+
+  try {
+    const reportRes = await apiFetch(`/api/interviews/${interviewId}/report`);
+    return reportRes.report || null;
+  } catch {
+    return null;
+  }
+}
+
+function buildRecordSnapshot(report = null) {
+  if (!state.assessment) return null;
+
+  const candidate = el.candidateName.value.trim() || "未命名候选人";
+  const dimension = Array.isArray(state.assessment.dimension) ? state.assessment.dimension : [];
+
+  return {
+    id: Date.now(),
+    interviewId: state.lastInterviewId,
+    time: new Date().toLocaleString(),
+    candidate,
+    jobTitle: report?.jobTitle || state.jd?.jobTitle || "",
+    total: report?.totalScore ?? state.assessment.total,
+    suggestion: report?.suggestion || state.assessment.suggestion,
+    summary: report?.summary || state.assessment.summary || "",
+    source: state.assessmentSource || "rule",
+    dimension,
+    questionCount: state.questions.length,
+    transcript: el.transcript.value.trim(),
+    jdText: el.jdText.value.trim(),
+    resumeText: el.resumeText.value.trim(),
+  };
+}
+
+function buildReportText(record) {
+  const dimensionText = (record.dimension || [])
+    .map((item) => `- ${item.name}: ${item.score}`)
+    .join("\n");
+
+  return [
+    "影楼候选人评估报告",
+    "====================",
+    `生成时间: ${record.time}`,
+    `候选人: ${record.candidate}`,
+    `岗位: ${record.jobTitle}`,
+    `总分: ${record.total}`,
+    `建议: ${record.suggestion}`,
+    `评估来源: ${record.source === "ai" ? "AI模型" : "规则引擎"}`,
+    `题目数量: ${record.questionCount || 0}`,
+    "",
+    "维度评分:",
+    dimensionText || "- 无",
+    "",
+    "评估摘要:",
+    record.summary || "无",
+    "",
+    "面试转写:",
+    record.transcript || "无",
+    "",
+    "岗位画像(JD):",
+    record.jdText || "无",
+    "",
+    "候选人简历:",
+    record.resumeText || "无",
+  ].join("\n");
+}
+
+function exportArchiveAsCsv(records) {
+  const headers = [
+    "time",
+    "candidate",
+    "jobTitle",
+    "total",
+    "suggestion",
+    "source",
+    "summary",
+    "dimension",
+    "questionCount",
+    "interviewId",
+    "transcript",
+  ];
+
+  const rows = records.map((record) => {
+    const dimension = Array.isArray(record.dimension)
+      ? record.dimension.map((item) => `${item.name}:${item.score}`).join("; ")
+      : "";
+
+    return [
+      record.time,
+      record.candidate,
+      record.jobTitle,
+      record.total,
+      record.suggestion,
+      record.source,
+      record.summary,
+      dimension,
+      record.questionCount,
+      record.interviewId,
+      record.transcript,
+    ].map(escapeCsvCell).join(",");
+  });
+
+  return `\uFEFF${headers.join(",")}\n${rows.join("\n")}`;
+}
 async function handleUpload(file, kind) {
   const ok = await checkBackend();
   if (!ok) {
@@ -593,6 +736,7 @@ el.evaluateBtn.addEventListener("click", async () => {
       },
     });
 
+    state.assessmentSource = evaluateRes.source || "rule";
     state.assessment = normalizeAssessment(evaluateRes.assessment);
     renderAssessment(state.assessment);
   } catch (error) {
@@ -608,35 +752,71 @@ el.saveBtn.addEventListener("click", async () => {
     return;
   }
 
-  const candidate = el.candidateName.value.trim() || "未命名候选人";
-  let report = null;
+  const report = await fetchInterviewReportById(state.lastInterviewId);
+  const record = buildRecordSnapshot(report);
 
-  if (state.lastInterviewId) {
-    try {
-      const reportRes = await apiFetch(`/api/interviews/${state.lastInterviewId}/report`);
-      report = reportRes.report || null;
-    } catch {
-      report = null;
-    }
+  if (!record) {
+    alert("当前没有可保存的评估记录");
+    return;
   }
-
-  const record = {
-    id: Date.now(),
-    interviewId: state.lastInterviewId,
-    time: new Date().toLocaleString(),
-    candidate,
-    jobTitle: report?.jobTitle || state.jd.jobTitle,
-    total: report?.totalScore ?? state.assessment.total,
-    suggestion: report?.suggestion || state.assessment.suggestion,
-    transcript: el.transcript.value.trim(),
-  };
 
   const records = readArchive();
   records.unshift(record);
-  writeArchive(records.slice(0, 100));
+  writeArchive(records.slice(0, 200));
   renderArchive();
   alert("已保存到候选人档案（本地）");
 });
 
+el.downloadReportBtn.addEventListener("click", async () => {
+  if (!state.jd || !state.assessment) {
+    alert("请先完成评估，再下载报告");
+    return;
+  }
+
+  const report = await fetchInterviewReportById(state.lastInterviewId);
+  const record = buildRecordSnapshot(report);
+
+  if (!record) {
+    alert("当前没有可下载的评估结果");
+    return;
+  }
+
+  const fileName = `${sanitizeFileSegment(record.candidate || "candidate")}_${sanitizeFileSegment(record.jobTitle || "job")}_评估报告_${buildTimestampForFile()}.txt`;
+  const content = buildReportText(record);
+  downloadFile(fileName, content);
+});
+
+el.exportCsvBtn.addEventListener("click", () => {
+  const records = readArchive();
+  if (!records.length) {
+    alert("暂无可导出的档案数据");
+    return;
+  }
+
+  const csv = exportArchiveAsCsv(records);
+  const fileName = `候选人档案批量导出_${buildTimestampForFile()}.csv`;
+  downloadFile(fileName, csv, "text/csv;charset=utf-8");
+});
+
+el.exportJsonBtn.addEventListener("click", () => {
+  const records = readArchive();
+  if (!records.length) {
+    alert("暂无可导出的档案数据");
+    return;
+  }
+
+  const jsonText = JSON.stringify(records, null, 2);
+  const fileName = `候选人档案批量导出_${buildTimestampForFile()}.json`;
+  downloadFile(fileName, jsonText, "application/json;charset=utf-8");
+});
 checkBackend();
 renderArchive();
+
+
+
+
+
+
+
+
+

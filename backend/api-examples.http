@@ -3,6 +3,9 @@
 ### 健康检查
 GET {{baseUrl}}/api/health
 
+### AI状态
+GET {{baseUrl}}/api/ai/status
+
 ### 新建岗位（支持 jdText）
 POST {{baseUrl}}/api/jobs
 Content-Type: application/json

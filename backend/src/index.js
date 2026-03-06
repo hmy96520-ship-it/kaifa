@@ -8,6 +8,7 @@ import mammoth from "mammoth";
 import pdfParse from "pdf-parse";
 import { pool } from "./db.js";
 import { generateQuestionsFromJd, normalizeJdPayload, evaluateInterview } from "./domain.js";
+import { generateQuestionsByAI, evaluateByAI, getAiStatus } from "./aiClient.js";
 
 dotenv.config();
 
@@ -104,7 +105,14 @@ app.get(
   "/api/health",
   asyncHandler(async (_req, res) => {
     const [rows] = await pool.query("SELECT 1 AS ok");
-    res.json({ ok: true, db: rows[0].ok === 1 });
+    res.json({ ok: true, db: rows[0].ok === 1, ai: getAiStatus() });
+  }),
+);
+
+app.get(
+  "/api/ai/status",
+  asyncHandler(async (_req, res) => {
+    res.json({ ok: true, ai: getAiStatus() });
   }),
 );
 
@@ -177,7 +185,21 @@ app.post(
       niceSkills: safeJsonArray(job.nice_skills),
     };
 
-    const questions = generateQuestionsFromJd(jd, { resumeText });
+    let questions = generateQuestionsFromJd(jd, { resumeText });
+    let source = "rule";
+
+    const ai = getAiStatus();
+    if (ai.enabled) {
+      try {
+        const aiQuestions = await generateQuestionsByAI({ jd, resumeText });
+        if (aiQuestions.length) {
+          questions = aiQuestions;
+          source = "ai";
+        }
+      } catch (error) {
+        console.warn("AI question generation failed, fallback to rules:", error.message);
+      }
+    }
 
     await pool.execute("DELETE FROM question_bank WHERE job_post_id = ?", [jobId]);
     for (const item of questions) {
@@ -188,7 +210,7 @@ app.post(
       );
     }
 
-    res.json({ ok: true, count: questions.length, questions });
+    res.json({ ok: true, source, count: questions.length, questions });
   }),
 );
 
@@ -314,12 +336,30 @@ app.post(
       return;
     }
 
-    const result = evaluateInterview({
+    const questionCount = Number(questionRows[0].count || 0);
+
+    let result = evaluateInterview({
       transcript,
       jd,
-      questionCount: Number(questionRows[0].count || 0),
+      questionCount,
       resumeText,
     });
+    let source = "rule";
+
+    const ai = getAiStatus();
+    if (ai.enabled) {
+      try {
+        result = await evaluateByAI({
+          transcript,
+          jd,
+          questionCount,
+          resumeText,
+        });
+        source = "ai";
+      } catch (error) {
+        console.warn("AI evaluation failed, fallback to rules:", error.message);
+      }
+    }
 
     await pool.execute(
       `INSERT INTO ai_assessment
@@ -343,7 +383,7 @@ app.post(
         result.communicationScore,
         result.riskScore,
         result.summary,
-        JSON.stringify(result),
+        JSON.stringify({ ...result, source }),
       ],
     );
 
@@ -352,7 +392,7 @@ app.post(
       [interviewId],
     );
 
-    res.json({ ok: true, assessment: result });
+    res.json({ ok: true, source, assessment: result });
   }),
 );
 
