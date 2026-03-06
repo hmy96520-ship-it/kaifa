@@ -88,6 +88,37 @@ body {
   margin-top: 0;
 }
 
+.upload-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.file-label {
+  display: block;
+  flex: 1;
+}
+
+.status-pill {
+  flex: 0 0 auto;
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  color: #374151;
+  background: #e5e7eb;
+}
+
+.status-pill.good {
+  color: #065f46;
+  background: #d1fae5;
+}
+
+.status-pill.bad {
+  color: #9f1239;
+  background: #ffe4e6;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -233,7 +264,8 @@ th {
     flex: 1 1 40%;
   }
 
-  .backend-line {
+  .backend-line,
+  .upload-row {
     flex-wrap: wrap;
   }
 }

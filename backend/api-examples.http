@@ -3,7 +3,7 @@
 ### 健康检查
 GET {{baseUrl}}/api/health
 
-### 1) 创建岗位
+### 新建岗位（支持 jdText）
 POST {{baseUrl}}/api/jobs
 Content-Type: application/json
 
@@ -11,13 +11,19 @@ Content-Type: application/json
   "title": "摄影师",
   "mustSkills": ["人像布光", "客户沟通", "拍摄流程控制"],
   "niceSkills": ["短视频", "直播"],
-  "responsibilities": "独立完成客片拍摄并把控成片质量"
+  "responsibilities": "独立完成客片拍摄并把控成片质量",
+  "jdText": "岗位职责：负责客片拍摄、客户沟通与影棚流程管理"
 }
 
-### 2) 生成题库（把 1 替换为你的 jobId）
+### 生成题库（可传简历文本）
 POST {{baseUrl}}/api/jobs/1/questions/generate
+Content-Type: application/json
 
-### 3) 创建面试会话
+{
+  "resumeText": "3年儿童摄影经验，擅长布光和客户沟通，参与门店短视频项目"
+}
+
+### 创建面试会话
 POST {{baseUrl}}/api/interviews
 Content-Type: application/json
 
@@ -27,17 +33,22 @@ Content-Type: application/json
   "interviewerName": "HR李"
 }
 
-### 4) 追加转写（把 1 替换为你的 interviewId）
+### 追加转写
 POST {{baseUrl}}/api/interviews/1/transcripts
 Content-Type: application/json
 
 {
   "speaker": "candidate",
-  "content": "我在上一家公司主要负责影楼客片拍摄，日均服务5组客户，重点是控制流程和出片质量。"
+  "content": "我在上一家公司主要负责客片拍摄，日均服务5组客户，重点是控制流程和出片质量。"
 }
 
-### 5) 生成评估
+### 评估（传入简历）
 POST {{baseUrl}}/api/interviews/1/evaluate
+Content-Type: application/json
 
-### 6) 获取报告
+{
+  "resumeText": "3年儿童摄影经验，擅长布光和客户沟通"
+}
+
+### 报告
 GET {{baseUrl}}/api/interviews/1/report

@@ -3,6 +3,9 @@ import cors from "cors";
 import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import multer from "multer";
+import mammoth from "mammoth";
+import pdfParse from "pdf-parse";
 import { pool } from "./db.js";
 import { generateQuestionsFromJd, normalizeJdPayload, evaluateInterview } from "./domain.js";
 
@@ -14,10 +17,56 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.resolve(__dirname, "..", "public");
 
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+  },
+});
+
 function asyncHandler(fn) {
   return (req, res, next) => {
     Promise.resolve(fn(req, res, next)).catch(next);
   };
+}
+
+function runSingleFileUpload(req, res) {
+  return new Promise((resolve, reject) => {
+    upload.single("file")(req, res, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
+function normalizeText(text) {
+  return String(text || "")
+    .replace(/\u0000/g, "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+}
+
+async function extractTextFromFile(file) {
+  const fileName = String(file.originalname || "");
+  const ext = path.extname(fileName).toLowerCase();
+  const mime = String(file.mimetype || "").toLowerCase();
+
+  if (ext === ".pdf" || mime.includes("pdf")) {
+    const data = await pdfParse(file.buffer);
+    return normalizeText(data.text);
+  }
+
+  if (ext === ".docx" || mime.includes("officedocument.wordprocessingml.document")) {
+    const data = await mammoth.extractRawText({ buffer: file.buffer });
+    return normalizeText(data.value);
+  }
+
+  const textLike = [".txt", ".md", ".json", ".csv", ".log"];
+  if (mime.startsWith("text/") || textLike.includes(ext) || !ext) {
+    return normalizeText(file.buffer.toString("utf8"));
+  }
+
+  return normalizeText(file.buffer.toString("utf8"));
 }
 
 function safeJsonArray(value) {
@@ -48,7 +97,7 @@ function safeJsonArray(value) {
 }
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 app.use(express.static(publicDir));
 
 app.get(
@@ -56,6 +105,30 @@ app.get(
   asyncHandler(async (_req, res) => {
     const [rows] = await pool.query("SELECT 1 AS ok");
     res.json({ ok: true, db: rows[0].ok === 1 });
+  }),
+);
+
+app.post(
+  "/api/files/parse-text",
+  asyncHandler(async (req, res) => {
+    await runSingleFileUpload(req, res);
+
+    if (!req.file) {
+      res.status(400).json({ ok: false, message: "file is required" });
+      return;
+    }
+
+    const text = await extractTextFromFile(req.file);
+    if (!text) {
+      res.status(400).json({ ok: false, message: "no readable text found in file" });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      fileName: req.file.originalname,
+      text: text.slice(0, 30000),
+    });
   }),
 );
 
@@ -88,6 +161,8 @@ app.post(
       return;
     }
 
+    const resumeText = String(req.body?.resumeText || "").trim();
+
     const [rows] = await pool.execute("SELECT * FROM job_post WHERE id = ?", [jobId]);
     if (!rows.length) {
       res.status(404).json({ ok: false, message: "job not found" });
@@ -102,7 +177,7 @@ app.post(
       niceSkills: safeJsonArray(job.nice_skills),
     };
 
-    const questions = generateQuestionsFromJd(jd);
+    const questions = generateQuestionsFromJd(jd, { resumeText });
 
     await pool.execute("DELETE FROM question_bank WHERE job_post_id = ?", [jobId]);
     for (const item of questions) {
@@ -191,6 +266,8 @@ app.post(
       return;
     }
 
+    const resumeText = String(req.body?.resumeText || "").trim();
+
     const [interviewRows] = await pool.execute(
       `SELECT i.id, i.job_post_id AS jobPostId
        FROM interview_session i
@@ -241,6 +318,7 @@ app.post(
       transcript,
       jd,
       questionCount: Number(questionRows[0].count || 0),
+      resumeText,
     });
 
     await pool.execute(
@@ -341,8 +419,3 @@ process.on("uncaughtException", (err) => {
 app.listen(port, () => {
   console.log(`Studio HR backend listening at http://localhost:${port}`);
 });
-
-
-
-
-

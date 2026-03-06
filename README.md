@@ -1,35 +1,35 @@
 ﻿# 影楼人资系统（流程 MVP）
 
-你现在有两部分：
+当前版本已经支持：
 
-- 前端原型：`index.html`（浏览器打开）
-- 正式后端：`backend/`（Node.js + MySQL）
+- 上传岗位 JD 文件（txt/pdf/docx）并自动解析文本
+- 上传候选人简历文件（txt/pdf/docx）并自动解析文本
+- 根据 JD + 简历生成更有针对性的结构化面试题
+- 根据 JD + 简历 + 面试转写进行综合评分
 
-## 启动顺序
+## 启动方式
 
-1. 启动 MySQL 服务（你已完成）
-2. 启动后端：
+1. 启动后端
 
 ```bash
 cd C:\Users\96520\Desktop\codex\backend
+npm install
 npm run dev
 ```
 
-3. 打开前端页面：
+2. 打开页面
 
-- 双击 `C:\Users\96520\Desktop\codex\index.html`
-- 页面顶部会显示“后端连接状态”
+- 本地原型：双击 `C:\Users\96520\Desktop\codex\index.html`
+- 部署版：访问 Railway 域名
 
-## 当前前端能力
+## 关键说明
 
-- 填写 JD 后点击“生成结构化面试题库”：会调用后端并写入数据库
-- 面试记录后点击“生成初步评分与建议”：会创建面试会话、写入转写、调用 AI 评估接口
-- 点击“保存到候选人档案”：保存本地归档（可后续改为后端持久化）
+- 题库生成接口：`POST /api/jobs/:jobId/questions/generate`，可传 `resumeText`
+- 评估接口：`POST /api/interviews/:interviewId/evaluate`，可传 `resumeText`
+- 文件解析接口：`POST /api/files/parse-text`（form-data, field: `file`）
 
-## 数据库脚本
+## 目录
 
-- `database/schema.sql`
-
-## 后端接口示例
-
-- `backend/api-examples.http`
+- `backend/src`：后端接口与业务逻辑
+- `backend/public`：部署时静态页面
+- `database/schema.sql`：数据库建表脚本

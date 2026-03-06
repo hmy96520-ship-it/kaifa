@@ -10,7 +10,7 @@
     <main class="container">
       <header class="hero">
         <h1>影楼人资系统 - 面试流程 MVP</h1>
-        <p>网页端联调版：岗位 JD -> 结构化题库 -> 实时转写 -> AI 辅助评估 -> 结果归档</p>
+        <p>JD + 简历联合驱动：岗位画像 -> 结构化题库 -> 面试转写 -> AI 综合评估</p>
         <div class="backend-line">
           <span id="backendStatus" class="backend-tag bad">后端：未检测</span>
           <button id="recheckBtn" type="button">重新检测后端</button>
@@ -18,7 +18,24 @@
       </header>
 
       <section class="card">
-        <h2>1) 岗位 JD</h2>
+        <h2>1) 岗位画像与候选人简历</h2>
+
+        <div class="upload-row">
+          <label class="file-label">
+            上传岗位 JD 文件（txt/pdf/docx）
+            <input id="jdFile" type="file" accept=".txt,.md,.pdf,.docx,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+          </label>
+          <span id="jdUploadStatus" class="status-pill">未上传</span>
+        </div>
+
+        <div class="upload-row">
+          <label class="file-label">
+            上传候选人简历文件（txt/pdf/docx）
+            <input id="resumeFile" type="file" accept=".txt,.md,.pdf,.docx,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+          </label>
+          <span id="resumeUploadStatus" class="status-pill">未上传</span>
+        </div>
+
         <div class="grid">
           <label>
             岗位名称
@@ -36,14 +53,22 @@
             核心职责
             <textarea id="responsibilities" rows="3" placeholder="例如：独立完成客片拍摄，控制出片质量，和化妆师协同推进拍摄节奏"></textarea>
           </label>
+          <label class="full">
+            岗位画像原文（可粘贴；上传 JD 后自动填充）
+            <textarea id="jdText" rows="6" placeholder="粘贴完整岗位画像（JD）原文，系统会结合结构化字段生成更精准题库。"></textarea>
+          </label>
+          <label class="full">
+            候选人简历文本（上传简历后自动填充）
+            <textarea id="resumeText" rows="6" placeholder="粘贴候选人简历原文，系统会根据简历做针对性出题和评估。"></textarea>
+          </label>
         </div>
         <button id="generateBtn">生成结构化面试题库</button>
       </section>
 
       <section class="card">
         <h2>2) 结构化面试题库</h2>
-        <p class="hint">每题都带“考察点 + 评分标准”，方便统一面试口径。</p>
-        <div id="questionEmpty" class="empty">还没有题目，请先填写 JD 并点击“生成结构化面试题库”。</div>
+        <p class="hint">每题都带“考察点 + 评分标准”，并基于 JD + 简历做针对性追问。</p>
+        <div id="questionEmpty" class="empty">还没有题目，请先填写/上传 JD 与简历并点击“生成结构化面试题库”。</div>
         <table id="questionTable" class="hidden">
           <thead>
             <tr>
@@ -99,7 +124,7 @@
 
       <section class="card">
         <h2>5) 候选人档案（本地）</h2>
-        <p class="hint">当前为本地浏览器存储，后续可替换为数据库。</p>
+        <p class="hint">当前为本地浏览器存储，可后续升级为后端持久化。</p>
         <div id="archiveEmpty" class="empty">暂无记录。</div>
         <ul id="archiveList" class="archive-list"></ul>
       </section>

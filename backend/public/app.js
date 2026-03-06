@@ -8,6 +8,31 @@ const API_BASE = IS_FILE_MODE
     : "";
 const ARCHIVE_KEY = "studio_hr_records";
 
+const COMMON_SKILLS = [
+  "摄影",
+  "儿童摄影",
+  "人像摄影",
+  "布光",
+  "修图",
+  "后期",
+  "客片",
+  "选片",
+  "客户沟通",
+  "销售转化",
+  "门店接待",
+  "流程管理",
+  "排期",
+  "短视频",
+  "直播",
+  "团队协同",
+  "服务意识",
+  "审美",
+  "构图",
+  "灯光",
+  "妆造协同",
+  "引导拍摄",
+];
+
 const state = {
   jd: null,
   jobId: null,
@@ -21,10 +46,16 @@ const state = {
 const el = {
   backendStatus: document.getElementById("backendStatus"),
   recheckBtn: document.getElementById("recheckBtn"),
+  jdFile: document.getElementById("jdFile"),
+  jdUploadStatus: document.getElementById("jdUploadStatus"),
+  resumeFile: document.getElementById("resumeFile"),
+  resumeUploadStatus: document.getElementById("resumeUploadStatus"),
   jobTitle: document.getElementById("jobTitle"),
   mustSkills: document.getElementById("mustSkills"),
   niceSkills: document.getElementById("niceSkills"),
   responsibilities: document.getElementById("responsibilities"),
+  jdText: document.getElementById("jdText"),
+  resumeText: document.getElementById("resumeText"),
   generateBtn: document.getElementById("generateBtn"),
   questionEmpty: document.getElementById("questionEmpty"),
   questionTable: document.getElementById("questionTable"),
@@ -55,31 +86,102 @@ function splitByComma(text) {
     .filter(Boolean);
 }
 
+function uniqueKeepOrder(items) {
+  const seen = new Set();
+  const result = [];
+
+  for (const item of items) {
+    const key = String(item || "").trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(key);
+  }
+
+  return result;
+}
+
+function inferTitleFromText(text) {
+  const source = String(text || "").trim();
+  if (!source) return "";
+
+  const match = source.match(/(?:岗位|职位|招聘岗位|招聘职位)\s*[：:]\s*([^\n\r]+)/);
+  if (match && match[1]) return match[1].trim().slice(0, 60);
+
+  const firstLine = source
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  return (firstLine || "").slice(0, 60);
+}
+
+function inferSkillsFromText(text, limit = 6) {
+  const source = String(text || "");
+  return COMMON_SKILLS.filter((skill) => source.includes(skill)).slice(0, limit);
+}
+
 function collectJd() {
-  const jd = {
-    jobTitle: el.jobTitle.value.trim(),
-    mustSkills: splitByComma(el.mustSkills.value),
-    niceSkills: splitByComma(el.niceSkills.value),
-    responsibilities: el.responsibilities.value.trim(),
+  const jdText = el.jdText.value.trim();
+  const resumeText = el.resumeText.value.trim();
+
+  let jobTitle = el.jobTitle.value.trim();
+  let responsibilities = el.responsibilities.value.trim();
+
+  if (!jobTitle && jdText) {
+    jobTitle = inferTitleFromText(jdText) || "未命名岗位";
+    el.jobTitle.value = jobTitle;
+  }
+
+  if (!responsibilities && jdText) {
+    responsibilities = jdText.slice(0, 1200);
+    el.responsibilities.value = responsibilities;
+  }
+
+  let mustSkills = splitByComma(el.mustSkills.value);
+  let niceSkills = splitByComma(el.niceSkills.value);
+
+  if (!mustSkills.length && jdText) {
+    mustSkills = inferSkillsFromText(jdText, 6);
+    el.mustSkills.value = mustSkills.join(",");
+  }
+
+  if (!niceSkills.length && jdText) {
+    const inferred = inferSkillsFromText(jdText, 12);
+    niceSkills = inferred.filter((item) => !mustSkills.includes(item)).slice(0, 6);
+    el.niceSkills.value = niceSkills.join(",");
+  }
+
+  if (!jobTitle) {
+    alert("请先填写岗位名称，或上传包含岗位信息的 JD 文件");
+    return null;
+  }
+
+  if (!responsibilities && !jdText) {
+    alert("请先填写核心职责，或上传/粘贴 JD 原文");
+    return null;
+  }
+
+  return {
+    jobTitle,
+    mustSkills,
+    niceSkills,
+    responsibilities,
+    jdText,
+    resumeText,
   };
-
-  if (!jd.jobTitle) {
-    alert("请先填写岗位名称");
-    return null;
-  }
-
-  if (!jd.responsibilities) {
-    alert("请先填写核心职责");
-    return null;
-  }
-
-  return jd;
 }
 
 function setBackendStatus(ok, text) {
   el.backendStatus.textContent = text;
   el.backendStatus.classList.remove("good", "bad");
   el.backendStatus.classList.add(ok ? "good" : "bad");
+}
+
+function setPillStatus(node, text, good = false, bad = false) {
+  node.textContent = text;
+  node.classList.remove("good", "bad");
+  if (good) node.classList.add("good");
+  if (bad) node.classList.add("bad");
 }
 
 async function apiFetch(path, options = {}) {
@@ -111,18 +213,45 @@ async function apiFetch(path, options = {}) {
   return data;
 }
 
+async function uploadFileForText(file) {
+  const form = new FormData();
+  form.append("file", file);
+
+  const response = await fetch(`${API_BASE}/api/files/parse-text`, {
+    method: "POST",
+    body: form,
+  });
+
+  const raw = await response.text();
+  let data = null;
+
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = { message: raw };
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(data?.message || `HTTP ${response.status}`);
+  }
+
+  return data;
+}
+
 async function checkBackend() {
   try {
     const health = await apiFetch("/api/health");
     if (health.ok && health.db) {
-      setBackendStatus(true, "后端：已连接 (3001)");
+      setBackendStatus(true, "后端：已连接");
       return true;
     }
 
     setBackendStatus(false, "后端：未就绪");
     return false;
   } catch {
-    setBackendStatus(false, "后端：连接失败，请先 npm run dev");
+    setBackendStatus(false, "后端：连接失败，请先启动 backend");
     return false;
   }
 }
@@ -147,9 +276,7 @@ function renderQuestions(questions) {
 
 function setupSpeechRecognition() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) {
-    return null;
-  }
+  if (!SpeechRecognition) return null;
 
   const recognition = new SpeechRecognition();
   recognition.lang = "zh-CN";
@@ -195,16 +322,22 @@ function setupSpeechRecognition() {
 }
 
 function normalizeAssessment(apiResult) {
+  const dimension = [
+    { name: "JD覆盖", score: apiResult.coverageScore },
+    { name: "回答深度", score: apiResult.depthScore },
+    { name: "表达结构", score: apiResult.communicationScore },
+    { name: "风险控制", score: apiResult.riskScore },
+  ];
+
+  if (typeof apiResult.resumeAlignmentScore === "number") {
+    dimension.push({ name: "简历匹配", score: apiResult.resumeAlignmentScore });
+  }
+
   return {
     total: apiResult.totalScore,
     suggestion: apiResult.suggestion,
     summary: apiResult.summary,
-    dimension: [
-      { name: "技能覆盖", score: apiResult.coverageScore },
-      { name: "回答深度", score: apiResult.depthScore },
-      { name: "表达结构", score: apiResult.communicationScore },
-      { name: "风险控制", score: apiResult.riskScore },
-    ],
+    dimension,
   };
 }
 
@@ -259,10 +392,76 @@ function setButtonBusy(button, busyText, idleText, busy) {
   button.textContent = busy ? busyText : idleText;
 }
 
+async function handleUpload(file, kind) {
+  const ok = await checkBackend();
+  if (!ok) {
+    alert("后端未连接，请先启动后端服务");
+    return;
+  }
+
+  const statusNode = kind === "jd" ? el.jdUploadStatus : el.resumeUploadStatus;
+  setPillStatus(statusNode, "解析中...");
+
+  try {
+    const data = await uploadFileForText(file);
+    const text = String(data.text || "").trim();
+
+    if (!text) {
+      throw new Error("文件中没有可识别文本");
+    }
+
+    if (kind === "jd") {
+      el.jdText.value = text;
+
+      if (!el.jobTitle.value.trim()) {
+        el.jobTitle.value = inferTitleFromText(text) || el.jobTitle.value;
+      }
+
+      if (!el.responsibilities.value.trim()) {
+        el.responsibilities.value = text.slice(0, 1200);
+      }
+
+      const must = splitByComma(el.mustSkills.value);
+      if (!must.length) {
+        el.mustSkills.value = uniqueKeepOrder(inferSkillsFromText(text, 6)).join(",");
+      }
+
+      const nice = splitByComma(el.niceSkills.value);
+      if (!nice.length) {
+        const inferred = inferSkillsFromText(text, 12);
+        const mustSet = new Set(splitByComma(el.mustSkills.value));
+        const niceAuto = inferred.filter((item) => !mustSet.has(item)).slice(0, 6);
+        el.niceSkills.value = uniqueKeepOrder(niceAuto).join(",");
+      }
+
+      setPillStatus(statusNode, `JD已解析: ${data.fileName}`, true, false);
+      return;
+    }
+
+    el.resumeText.value = text;
+    setPillStatus(statusNode, `简历已解析: ${data.fileName}`, true, false);
+  } catch (error) {
+    setPillStatus(statusNode, `解析失败: ${error.message}`, false, true);
+    alert(`文件解析失败：${error.message}`);
+  }
+}
+
 el.recheckBtn.addEventListener("click", async () => {
   el.recheckBtn.disabled = true;
   await checkBackend();
   el.recheckBtn.disabled = false;
+});
+
+el.jdFile.addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  await handleUpload(file, "jd");
+});
+
+el.resumeFile.addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  await handleUpload(file, "resume");
 });
 
 el.generateBtn.addEventListener("click", async () => {
@@ -285,6 +484,7 @@ el.generateBtn.addEventListener("click", async () => {
         mustSkills: jd.mustSkills,
         niceSkills: jd.niceSkills,
         responsibilities: jd.responsibilities,
+        jdText: jd.jdText,
       },
     });
 
@@ -293,6 +493,9 @@ el.generateBtn.addEventListener("click", async () => {
 
     const questionRes = await apiFetch(`/api/jobs/${state.jobId}/questions/generate`, {
       method: "POST",
+      body: {
+        resumeText: jd.resumeText,
+      },
     });
 
     state.questions = (questionRes.questions || []).map((item) => ({
@@ -353,6 +556,7 @@ el.evaluateBtn.addEventListener("click", async () => {
   }
 
   const candidateName = el.candidateName.value.trim() || "未命名候选人";
+  const resumeText = el.resumeText.value.trim();
 
   const ok = await checkBackend();
   if (!ok) {
@@ -384,6 +588,9 @@ el.evaluateBtn.addEventListener("click", async () => {
 
     const evaluateRes = await apiFetch(`/api/interviews/${state.lastInterviewId}/evaluate`, {
       method: "POST",
+      body: {
+        resumeText,
+      },
     });
 
     state.assessment = normalizeAssessment(evaluateRes.assessment);
@@ -433,8 +640,3 @@ el.saveBtn.addEventListener("click", async () => {
 
 checkBackend();
 renderArchive();
-
-
-
-
-
