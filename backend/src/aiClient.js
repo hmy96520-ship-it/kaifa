@@ -9,8 +9,8 @@ const promptDir = path.resolve(__dirname, "..", "prompts");
 const PROVIDER_PRESETS = {
   deepseek: {
     baseUrl: "https://api.deepseek.com/v1",
-    modelQuestion: "deepseek-chat",
-    modelEval: "deepseek-chat",
+    modelQuestion: "deepseek-reasoner",
+    modelEval: "deepseek-reasoner",
   },
   qwen: {
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -30,17 +30,48 @@ function clamp(num, min, max) {
   return Math.max(min, Math.min(max, num));
 }
 
+const SENSITIVE_PATTERNS = [
+  /\b1[3-9]\d{9}\b/g,
+  /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,
+  /微信号?\s*[:：]?\s*[A-Za-z0-9_-]{5,}/gi,
+  /\b(wx|vx|wechat)\s*[:：]?\s*[A-Za-z0-9_-]{5,}/gi,
+  /\bqq\s*[:：]?\s*\d{5,12}\b/gi,
+  /联系方式\s*[:：]?\s*[^\n]*/gi,
+];
+
+function redactSensitive(text) {
+  let output = String(text || "");
+  for (const pattern of SENSITIVE_PATTERNS) {
+    output = output.replace(pattern, "[隐私信息]");
+  }
+
+  return output.replace(/\s{2,}/g, " ").trim();
+}
+
+function sanitizeResumeText(text) {
+  const raw = redactSensitive(text);
+
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/(联系方式|联系电话|手机号|手机|电话|微信|wx|vx|邮箱|mail|qq)/i.test(line));
+
+  return lines.join("\n").slice(0, 12000);
+}
+
 function uniqueQuestions(items) {
   const seen = new Set();
   const result = [];
 
   for (const item of items) {
     const category = String(item.category || "").trim();
-    const questionText = String(item.questionText || "").trim();
-    const focus = String(item.focus || "").trim();
-    const rubric = String(item.rubric || "").trim();
+    const questionText = redactSensitive(item.questionText || "");
+    const focus = redactSensitive(item.focus || "");
+    const rubric = redactSensitive(item.rubric || "");
 
     if (!category || !questionText || !focus || !rubric) continue;
+    if (questionText.includes("[隐私信息]")) continue;
 
     const key = `${category}::${questionText}`;
     if (seen.has(key)) continue;
@@ -194,6 +225,7 @@ export async function generateQuestionsByAI({ jd, resumeText }) {
   }
 
   const systemPrompt = await loadPrompt("question.system.txt");
+  const cleanedResumeText = sanitizeResumeText(resumeText);
   const userPrompt = [
     "请基于以下输入生成结构化面试题：",
     "",
@@ -203,7 +235,7 @@ export async function generateQuestionsByAI({ jd, resumeText }) {
     `岗位职责: ${jd.responsibilities}`,
     "",
     "候选人简历文本:",
-    resumeText || "(未提供简历文本)",
+    cleanedResumeText || "(未提供简历文本)",
   ].join("\n");
 
   const json = await callChatCompletion({
@@ -227,6 +259,8 @@ export async function evaluateByAI({ jd, transcript, resumeText, questionCount }
   }
 
   const systemPrompt = await loadPrompt("evaluate.system.txt");
+  const cleanedResumeText = sanitizeResumeText(resumeText);
+  const cleanedTranscript = redactSensitive(transcript).slice(0, 18000);
   const userPrompt = [
     "请基于以下信息输出面试评估 JSON：",
     "",
@@ -237,10 +271,10 @@ export async function evaluateByAI({ jd, transcript, resumeText, questionCount }
     `结构化题数量: ${questionCount}`,
     "",
     "候选人简历文本:",
-    resumeText || "(未提供简历文本)",
+    cleanedResumeText || "(未提供简历文本)",
     "",
     "面试转写:",
-    transcript,
+    cleanedTranscript,
   ].join("\n");
 
   const json = await callChatCompletion({
@@ -260,7 +294,7 @@ export async function evaluateByAI({ jd, transcript, resumeText, questionCount }
   const allowed = new Set(["建议录用", "建议复试", "不建议录用"]);
   const suggestion = allowed.has(suggestionRaw) ? suggestionRaw : "建议复试";
 
-  const summary = String(json?.summary || "").trim().slice(0, 260) || "基于JD、简历与面试转写完成综合评估。";
+  const summary = redactSensitive(String(json?.summary || "").trim()).slice(0, 260) || "基于JD、简历与面试转写完成综合评估。";
 
   return {
     totalScore: Math.round(totalScore),
@@ -273,3 +307,6 @@ export async function evaluateByAI({ jd, transcript, resumeText, questionCount }
     summary,
   };
 }
+
+
+

@@ -7,7 +7,7 @@ import multer from "multer";
 import mammoth from "mammoth";
 import pdfParse from "pdf-parse";
 import { pool } from "./db.js";
-import { generateQuestionsFromJd, normalizeJdPayload, evaluateInterview } from "./domain.js";
+import { normalizeJdPayload } from "./domain.js";
 import { generateQuestionsByAI, evaluateByAI, getAiStatus } from "./aiClient.js";
 
 dotenv.config();
@@ -185,20 +185,24 @@ app.post(
       niceSkills: safeJsonArray(job.nice_skills),
     };
 
-    let questions = generateQuestionsFromJd(jd, { resumeText });
-    let source = "rule";
-
     const ai = getAiStatus();
-    if (ai.enabled) {
-      try {
-        const aiQuestions = await generateQuestionsByAI({ jd, resumeText });
-        if (aiQuestions.length) {
-          questions = aiQuestions;
-          source = "ai";
-        }
-      } catch (error) {
-        console.warn("AI question generation failed, fallback to rules:", error.message);
-      }
+    if (!ai.enabled) {
+      res.status(503).json({
+        ok: false,
+        message: "AI is disabled. Please configure AI_PROVIDER, AI_BASE_URL and AI_API_KEY.",
+      });
+      return;
+    }
+
+    let questions = [];
+    try {
+      questions = await generateQuestionsByAI({ jd, resumeText });
+    } catch (error) {
+      res.status(502).json({
+        ok: false,
+        message: `AI question generation failed: ${error.message}`,
+      });
+      return;
     }
 
     await pool.execute("DELETE FROM question_bank WHERE job_post_id = ?", [jobId]);
@@ -210,7 +214,7 @@ app.post(
       );
     }
 
-    res.json({ ok: true, source, count: questions.length, questions });
+    res.json({ ok: true, source: "ai", count: questions.length, questions });
   }),
 );
 
@@ -338,27 +342,29 @@ app.post(
 
     const questionCount = Number(questionRows[0].count || 0);
 
-    let result = evaluateInterview({
-      transcript,
-      jd,
-      questionCount,
-      resumeText,
-    });
-    let source = "rule";
-
     const ai = getAiStatus();
-    if (ai.enabled) {
-      try {
-        result = await evaluateByAI({
-          transcript,
-          jd,
-          questionCount,
-          resumeText,
-        });
-        source = "ai";
-      } catch (error) {
-        console.warn("AI evaluation failed, fallback to rules:", error.message);
-      }
+    if (!ai.enabled) {
+      res.status(503).json({
+        ok: false,
+        message: "AI is disabled. Please configure AI_PROVIDER, AI_BASE_URL and AI_API_KEY.",
+      });
+      return;
+    }
+
+    let result;
+    try {
+      result = await evaluateByAI({
+        transcript,
+        jd,
+        questionCount,
+        resumeText,
+      });
+    } catch (error) {
+      res.status(502).json({
+        ok: false,
+        message: `AI evaluation failed: ${error.message}`,
+      });
+      return;
     }
 
     await pool.execute(
@@ -383,7 +389,7 @@ app.post(
         result.communicationScore,
         result.riskScore,
         result.summary,
-        JSON.stringify({ ...result, source }),
+        JSON.stringify({ ...result, source: "ai" }),
       ],
     );
 
@@ -392,7 +398,7 @@ app.post(
       [interviewId],
     );
 
-    res.json({ ok: true, source, assessment: result });
+    res.json({ ok: true, source: "ai", assessment: result });
   }),
 );
 
@@ -459,3 +465,4 @@ process.on("uncaughtException", (err) => {
 app.listen(port, () => {
   console.log(`Studio HR backend listening at http://localhost:${port}`);
 });
+
