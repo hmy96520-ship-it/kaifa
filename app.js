@@ -124,6 +124,26 @@ function inferSkillsFromText(text, limit = 6) {
   return COMMON_SKILLS.filter((skill) => source.includes(skill)).slice(0, limit);
 }
 
+function isPlaceholderLike(text) {
+  const value = String(text || "").trim();
+  if (!value) return true;
+  if (/^(1|11|111|123|1234|test|测试|aaa|xxx|null|none|n\/a)$/i.test(value)) return true;
+  if (/^[\d\W_]+$/.test(value) && value.length <= 4) return true;
+  return false;
+}
+
+function hasMeaningfulText(text, minLength = 8) {
+  const value = String(text || "").trim();
+  if (!value || isPlaceholderLike(value)) return false;
+
+  const compact = value.replace(/\s+/g, "");
+  if (compact.length >= minLength) return true;
+  if (/[\u4e00-\u9fa5]{4,}/.test(compact)) return true;
+  if (/[A-Za-z]{6,}/.test(compact)) return true;
+
+  return false;
+}
+
 function collectJd() {
   const jdText = el.jdText.value.trim();
   const resumeText = el.resumeText.value.trim();
@@ -160,8 +180,23 @@ function collectJd() {
     return null;
   }
 
+  if (isPlaceholderLike(jobTitle) || String(jobTitle).trim().length < 2) {
+    alert("岗位名称过短或像占位值，请填写真实岗位名称");
+    return null;
+  }
+
   if (!responsibilities && !jdText) {
     alert("请先填写核心职责，或上传/粘贴 JD 原文");
+    return null;
+  }
+
+  if (!hasMeaningfulText(responsibilities, 8) && !hasMeaningfulText(jdText, 12)) {
+    alert("核心职责或岗位画像原文内容过短/像占位值，请补充真实 JD 信息");
+    return null;
+  }
+
+  if (resumeText && !hasMeaningfulText(resumeText, 12)) {
+    alert("候选人简历文本内容过短或像占位值，请上传/粘贴真实简历内容");
     return null;
   }
 
@@ -638,6 +673,7 @@ el.generateBtn.addEventListener("click", async () => {
       method: "POST",
       body: {
         resumeText: jd.resumeText,
+        jdText: jd.jdText,
       },
     });
 
@@ -701,6 +737,21 @@ el.evaluateBtn.addEventListener("click", async () => {
   const candidateName = el.candidateName.value.trim() || "未命名候选人";
   const resumeText = el.resumeText.value.trim();
 
+  if (isPlaceholderLike(candidateName) || candidateName.length < 2) {
+    alert("候选人姓名过短或像占位值，请填写真实姓名或可识别标识");
+    return;
+  }
+
+  if (!hasMeaningfulText(transcriptText, 12)) {
+    alert("面试转写内容过短或像占位值，无法生成有效评估");
+    return;
+  }
+
+  if (resumeText && !hasMeaningfulText(resumeText, 12)) {
+    alert("候选人简历文本内容过短或像占位值，请补充真实简历后再评估");
+    return;
+  }
+
   const ok = await checkBackend();
   if (!ok) {
     alert("后端未连接，请先启动 backend: npm run dev");
@@ -733,6 +784,7 @@ el.evaluateBtn.addEventListener("click", async () => {
       method: "POST",
       body: {
         resumeText,
+        jdText: state.jd?.jdText || "",
       },
     });
 

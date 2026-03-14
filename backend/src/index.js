@@ -97,6 +97,26 @@ function safeJsonArray(value) {
   return [];
 }
 
+function isPlaceholderLike(text) {
+  const value = String(text || "").trim();
+  if (!value) return true;
+  if (/^(1|11|111|123|1234|test|测试|aaa|xxx|null|none|n\/a)$/i.test(value)) return true;
+  if (/^[\d\W_]+$/.test(value) && value.length <= 4) return true;
+  return false;
+}
+
+function hasMeaningfulText(text, minLength = 8) {
+  const value = String(text || "").trim();
+  if (!value || isPlaceholderLike(value)) return false;
+
+  const compact = value.replace(/\s+/g, "");
+  if (compact.length >= minLength) return true;
+  if (/[\u4e00-\u9fa5]{4,}/.test(compact)) return true;
+  if (/[A-Za-z]{6,}/.test(compact)) return true;
+
+  return false;
+}
+
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.use(express.static(publicDir));
@@ -170,6 +190,20 @@ app.post(
     }
 
     const resumeText = String(req.body?.resumeText || "").trim();
+    const jdText = String(req.body?.jdText || "").trim();
+
+    if (!hasMeaningfulText(jdText, 12)) {
+      res.status(400).json({ ok: false, message: "jdText is too short or looks like placeholder data" });
+      return;
+    }
+
+    if (resumeText && !hasMeaningfulText(resumeText, 12)) {
+      res.status(400).json({
+        ok: false,
+        message: "resumeText is too short or looks like placeholder data",
+      });
+      return;
+    }
 
     const [rows] = await pool.execute("SELECT * FROM job_post WHERE id = ?", [jobId]);
     if (!rows.length) {
@@ -183,6 +217,7 @@ app.post(
       responsibilities: String(job.responsibilities || "").trim(),
       mustSkills: safeJsonArray(job.must_skills),
       niceSkills: safeJsonArray(job.nice_skills),
+      jdText,
     };
 
     const ai = getAiStatus();
@@ -251,6 +286,11 @@ app.post(
       return;
     }
 
+    if (isPlaceholderLike(candidateName) || candidateName.length < 2) {
+      res.status(400).json({ ok: false, message: "candidateName is too short or looks like placeholder data" });
+      return;
+    }
+
     const [result] = await pool.execute(
       `INSERT INTO interview_session (job_post_id, candidate_name, interviewer_name)
        VALUES (?, ?, ?)`,
@@ -270,6 +310,11 @@ app.post(
 
     if (!interviewId || !content) {
       res.status(400).json({ ok: false, message: "interviewId and content are required" });
+      return;
+    }
+
+    if (!hasMeaningfulText(content, 12)) {
+      res.status(400).json({ ok: false, message: "transcript content is too short or looks like placeholder data" });
       return;
     }
 
@@ -293,6 +338,20 @@ app.post(
     }
 
     const resumeText = String(req.body?.resumeText || "").trim();
+    const jdText = String(req.body?.jdText || "").trim();
+
+    if (!hasMeaningfulText(jdText, 12)) {
+      res.status(400).json({ ok: false, message: "jdText is too short or looks like placeholder data" });
+      return;
+    }
+
+    if (resumeText && !hasMeaningfulText(resumeText, 12)) {
+      res.status(400).json({
+        ok: false,
+        message: "resumeText is too short or looks like placeholder data",
+      });
+      return;
+    }
 
     const [interviewRows] = await pool.execute(
       `SELECT i.id, i.job_post_id AS jobPostId
@@ -320,6 +379,7 @@ app.post(
       responsibilities: String(job.responsibilities || "").trim(),
       mustSkills: safeJsonArray(job.must_skills),
       niceSkills: safeJsonArray(job.nice_skills),
+      jdText,
     };
 
     const [questionRows] = await pool.execute(
@@ -337,6 +397,11 @@ app.post(
     const transcript = transcriptRows.map((row) => row.content).join(" ").trim();
     if (!transcript) {
       res.status(400).json({ ok: false, message: "transcript is empty" });
+      return;
+    }
+
+    if (!hasMeaningfulText(transcript, 12)) {
+      res.status(400).json({ ok: false, message: "transcript is too short or looks like placeholder data" });
       return;
     }
 

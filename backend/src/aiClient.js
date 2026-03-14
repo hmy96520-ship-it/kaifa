@@ -134,6 +134,13 @@ function resolveAiConfig() {
 
   const timeoutMs = Number(process.env.AI_TIMEOUT_MS || 20000);
   const forceJson = String(process.env.AI_FORCE_JSON || "true").toLowerCase() !== "false";
+  const requestedTemperature = process.env.AI_TEMPERATURE;
+  const temperature =
+    requestedTemperature !== undefined
+      ? Number(requestedTemperature)
+      : provider === "kimi" || String(modelQuestion).toLowerCase().includes("kimi-k2.5")
+        ? 1
+        : 0.2;
 
   return {
     enabled: Boolean(baseUrl && apiKey),
@@ -144,6 +151,7 @@ function resolveAiConfig() {
     modelEval,
     timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 20000,
     forceJson,
+    temperature: Number.isFinite(temperature) ? temperature : 0.2,
   };
 }
 
@@ -173,7 +181,7 @@ async function callChatCompletion({ model, systemPrompt, userPrompt }) {
 
   const body = {
     model,
-    temperature: 0.2,
+    temperature: cfg.temperature,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
@@ -231,6 +239,7 @@ export async function generateQuestionsByAI({ jd, resumeText }) {
 
   const systemPrompt = await loadPrompt("question.system.txt");
   const cleanedResumeText = sanitizeResumeText(resumeText);
+  const cleanedJdText = redactSensitive(jd.jdText || "").slice(0, 12000);
   const userPrompt = [
     "请基于以下输入生成结构化面试题：",
     "",
@@ -238,6 +247,9 @@ export async function generateQuestionsByAI({ jd, resumeText }) {
     `岗位必备技能: ${JSON.stringify(jd.mustSkills, null, 2)}`,
     `岗位加分技能: ${JSON.stringify(jd.niceSkills, null, 2)}`,
     `岗位职责: ${jd.responsibilities}`,
+    "",
+    "原始JD全文:",
+    cleanedJdText || "(未提供原始JD全文)",
     "",
     "候选人简历文本:",
     cleanedResumeText || "(未提供简历文本)",
@@ -266,6 +278,7 @@ export async function evaluateByAI({ jd, transcript, resumeText, questionCount }
   const systemPrompt = await loadPrompt("evaluate.system.txt");
   const cleanedResumeText = sanitizeResumeText(resumeText);
   const cleanedTranscript = redactSensitive(transcript).slice(0, 18000);
+  const cleanedJdText = redactSensitive(jd.jdText || "").slice(0, 12000);
   const userPrompt = [
     "请基于以下信息输出面试评估 JSON：",
     "",
@@ -273,6 +286,8 @@ export async function evaluateByAI({ jd, transcript, resumeText, questionCount }
     `岗位必备技能: ${JSON.stringify(jd.mustSkills, null, 2)}`,
     `岗位加分技能: ${JSON.stringify(jd.niceSkills, null, 2)}`,
     `岗位职责: ${jd.responsibilities}`,
+    "原始JD全文:",
+    cleanedJdText || "(未提供原始JD全文)",
     `结构化题数量: ${questionCount}`,
     "",
     "候选人简历文本:",
