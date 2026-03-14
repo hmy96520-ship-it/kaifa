@@ -756,11 +756,13 @@ function exportArchiveAsCsv(records) {
 }
 
 function buildInterviewContextKey(jobId, candidateName) {
-  return `${jobId || 0}::${String(candidateName || "").trim()}`;
+  const normalizedName = String(candidateName || "").trim() || "候选人";
+  return `${jobId || 0}::${normalizedName}`;
 }
 
 async function ensureInterviewSession(candidateName) {
-  const contextKey = buildInterviewContextKey(state.jobId, candidateName);
+  const normalizedName = String(candidateName || "").trim() || "候选人";
+  const contextKey = buildInterviewContextKey(state.jobId, normalizedName);
   if (state.lastInterviewId && state.interviewContextKey === contextKey) {
     return state.lastInterviewId;
   }
@@ -769,7 +771,7 @@ async function ensureInterviewSession(candidateName) {
     method: "POST",
     body: {
       jobId: state.jobId,
-      candidateName,
+      candidateName: normalizedName,
       interviewerName: "网页端",
     },
   });
@@ -791,19 +793,13 @@ function buildFollowupRequestKey(question, transcriptText, askedFollowups) {
 async function requestFollowupSuggestions({ manual = false } = {}) {
   const currentQuestion = getCurrentQuestion();
   const transcriptText = el.transcript.value.trim();
-  const candidateName = el.candidateName.value.trim();
+  const candidateName = el.candidateName.value.trim() || "候选人";
   const resumeText = el.resumeText.value.trim();
   const jdText = el.jdText.value.trim();
 
   if (!currentQuestion || !state.jobId) {
     updateFollowupStatus("状态：请先生成题库并选择当前题", true);
     renderFollowupState();
-    return;
-  }
-
-  if (isPlaceholderLike(candidateName) || candidateName.length < 2) {
-    updateFollowupStatus("状态：待填写候选人姓名", true);
-    if (manual) alert("请先填写真实候选人姓名，再分析追问建议");
     return;
   }
 
@@ -1104,13 +1100,8 @@ el.evaluateBtn.addEventListener("click", async () => {
     return;
   }
 
-  const candidateName = el.candidateName.value.trim() || "未命名候选人";
+  const candidateName = el.candidateName.value.trim() || "候选人";
   const resumeText = el.resumeText.value.trim();
-
-  if (isPlaceholderLike(candidateName) || candidateName.length < 2) {
-    alert("候选人姓名过短或像占位值，请填写真实姓名或可识别标识");
-    return;
-  }
 
   if (!hasMeaningfulText(transcriptText, 12)) {
     alert("面试转写内容过短或像占位值，无法生成有效评估");

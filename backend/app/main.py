@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from .ai_client import evaluate_by_ai, generate_questions_by_ai, get_ai_status, suggest_followups_by_ai
 from .config import get_settings
 from .db import db
-from .domain import has_meaningful_text, is_placeholder_like, normalize_jd_payload, safe_json_array
+from .domain import has_meaningful_text, normalize_jd_payload, safe_json_array
 from .files import extract_text_from_file
 
 settings = get_settings()
@@ -156,13 +156,11 @@ def get_questions(job_id: int):
 async def create_interview(request: Request):
     body = await request.json()
     job_id = int(body.get("jobId") or 0)
-    candidate_name = str(body.get("candidateName") or "").strip()
+    candidate_name = str(body.get("candidateName") or "").strip() or "候选人"
     interviewer_name = str(body.get("interviewerName") or "").strip()
 
-    if not job_id or not candidate_name:
-        raise HTTPException(status_code=400, detail="jobId and candidateName are required")
-    if is_placeholder_like(candidate_name) or len(candidate_name) < 2:
-        raise HTTPException(status_code=400, detail="candidateName is too short or looks like placeholder data")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="jobId is required")
 
     interview_id = db.execute(
         """
