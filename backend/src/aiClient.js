@@ -7,6 +7,11 @@ const __dirname = path.dirname(__filename);
 const promptDir = path.resolve(__dirname, "..", "prompts");
 
 const PROVIDER_PRESETS = {
+  kimi: {
+    baseUrl: "https://api.moonshot.cn/v1",
+    modelQuestion: "kimi-k2.5",
+    modelEval: "kimi-k2.5",
+  },
   deepseek: {
     baseUrl: "https://api.deepseek.com/v1",
     modelQuestion: "deepseek-reasoner",

@@ -35,20 +35,21 @@ curl http://localhost:3001/api/health
 - `backend/prompts/evaluate.system.txt`
 
 ### 环境变量
-- `AI_PROVIDER=deepseek|qwen|glm|custom`
+- `AI_PROVIDER=kimi|deepseek|qwen|glm|custom`
 - `AI_API_KEY=...`
 - `AI_BASE_URL=...`（provider 为 custom 时必填）
 - `AI_MODEL_QUESTION=...`
 - `AI_MODEL_EVAL=...`
 
 ### 内置 provider 预设
+- `kimi` -> `https://api.moonshot.cn/v1`
 - `deepseek` -> `https://api.deepseek.com/v1`
 - `qwen` -> `https://dashscope.aliyuncs.com/compatible-mode/v1`
 - `glm` -> `https://open.bigmodel.cn/api/paas/v4`
 
 当 AI 配置可用时：
-- 题库生成接口优先调用模型，失败自动回退规则引擎。
-- 面试评估接口优先调用模型，失败自动回退规则引擎。
+- 题库生成接口调用模型。
+- 面试评估接口调用模型。
 
 ## 7) 主要接口
 - `GET /api/ai/status` 查看 AI 配置状态（不返回密钥）
