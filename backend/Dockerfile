@@ -1,14 +1,17 @@
-﻿FROM node:20-alpine
+﻿FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm install --omit=dev
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-COPY src ./src
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
 COPY prompts ./prompts
 COPY public ./public
 
 EXPOSE 3001
 
-CMD ["npm", "start"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-3001}"]

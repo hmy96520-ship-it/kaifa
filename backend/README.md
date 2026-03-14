@@ -1,15 +1,15 @@
-﻿# Backend (Node.js + MySQL)
+﻿# Backend (Python/FastAPI + MySQL)
 
 ## 1) 安装依赖
 ```bash
 cd backend
-npm install
+py -m pip install -r requirements.txt
 ```
 
 ## 2) 配置环境变量
 复制 `.env.example` 为 `.env`：
 ```bash
-cp .env.example .env
+copy .env.example .env
 ```
 
 ## 3) 初始化数据库
@@ -20,7 +20,7 @@ mysql -u root -p < database/schema.sql
 ## 4) 启动
 ```bash
 cd backend
-npm run dev
+py -m uvicorn app.main:app --reload --host 0.0.0.0 --port 3001
 ```
 
 ## 5) 健康检查
@@ -33,6 +33,7 @@ curl http://localhost:3001/api/health
 ### 提示词文件
 - `backend/prompts/question.system.txt`
 - `backend/prompts/evaluate.system.txt`
+- `backend/prompts/followup.system.txt`
 
 ### 环境变量
 - `AI_PROVIDER=kimi|deepseek|qwen|glm|custom`
@@ -50,6 +51,7 @@ curl http://localhost:3001/api/health
 当 AI 配置可用时：
 - 题库生成接口调用模型。
 - 面试评估接口调用模型。
+- 实时追问建议接口调用模型。
 
 ## 7) 主要接口
 - `GET /api/ai/status` 查看 AI 配置状态（不返回密钥）
@@ -58,5 +60,6 @@ curl http://localhost:3001/api/health
 - `POST /api/jobs/:jobId/questions/generate` 生成题库（可附带 resumeText）
 - `POST /api/interviews` 创建面试会话
 - `POST /api/interviews/:interviewId/transcripts` 追加转写
+- `POST /api/interviews/:interviewId/followups/suggest` 生成当前题目的实时追问建议
 - `POST /api/interviews/:interviewId/evaluate` 评估（可附带 resumeText）
 - `GET /api/interviews/:interviewId/report` 报告

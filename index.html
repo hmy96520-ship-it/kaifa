@@ -76,6 +76,7 @@
               <th>题目</th>
               <th>考察点</th>
               <th>评分标准（简版）</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody id="questionBody"></tbody>
@@ -97,6 +98,37 @@
         <div class="toolbar">
           <input id="manualAppend" type="text" placeholder="手工补充一句记录后点追加" />
           <button id="appendBtn">追加</button>
+        </div>
+        <div class="followup-box">
+          <div class="followup-top">
+            <div class="followup-current">
+              <span class="followup-label">当前题目</span>
+              <strong id="currentQuestionPreview">请先在题库中选择“设为当前题”</strong>
+            </div>
+            <button id="suggestFollowupBtn" type="button">分析回答并给追问建议</button>
+            <span id="followupStatus" class="status">状态：待选择题目</span>
+          </div>
+          <div id="followupEmpty" class="empty">请先在题库中选择当前题，再开始转写或手工补充记录。系统会在转写静默后自动刷新追问建议。</div>
+          <div id="followupPanel" class="hidden">
+            <div class="followup-meta">
+              <span id="followupCompleteness" class="status-pill">回答完整度：待分析</span>
+              <span class="status-pill">自动分析：静默 6 秒后刷新</span>
+            </div>
+            <div class="followup-grid">
+              <div class="followup-section">
+                <h3>风险点</h3>
+                <ul id="followupRiskList" class="followup-list"></ul>
+              </div>
+              <div class="followup-section">
+                <h3>缺失信息</h3>
+                <ul id="followupMissingList" class="followup-list"></ul>
+              </div>
+            </div>
+            <div class="followup-section">
+              <h3>建议追问</h3>
+              <ul id="followupQuestionList" class="followup-list"></ul>
+            </div>
+          </div>
         </div>
       </section>
 

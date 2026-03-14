@@ -7,6 +7,7 @@ const API_BASE = IS_FILE_MODE
     ? `http://${window.location.hostname}:3001`
     : "";
 const ARCHIVE_KEY = "studio_hr_records";
+const FOLLOWUP_DEBOUNCE_MS = 6000;
 
 const COMMON_SKILLS = [
   "摄影",
@@ -41,7 +42,14 @@ const state = {
   assessment: null,
   assessmentSource: "rule",
   lastInterviewId: null,
+  interviewContextKey: "",
   recognition: null,
+  currentQuestionIndex: null,
+  followupAnalysis: null,
+  followupAsked: [],
+  followupTimer: null,
+  followupRequestSeq: 0,
+  lastFollowupKey: "",
 };
 
 const el = {
@@ -68,6 +76,15 @@ const el = {
   transcript: document.getElementById("transcript"),
   manualAppend: document.getElementById("manualAppend"),
   appendBtn: document.getElementById("appendBtn"),
+  currentQuestionPreview: document.getElementById("currentQuestionPreview"),
+  suggestFollowupBtn: document.getElementById("suggestFollowupBtn"),
+  followupStatus: document.getElementById("followupStatus"),
+  followupEmpty: document.getElementById("followupEmpty"),
+  followupPanel: document.getElementById("followupPanel"),
+  followupCompleteness: document.getElementById("followupCompleteness"),
+  followupRiskList: document.getElementById("followupRiskList"),
+  followupMissingList: document.getElementById("followupMissingList"),
+  followupQuestionList: document.getElementById("followupQuestionList"),
   evaluateBtn: document.getElementById("evaluateBtn"),
   saveBtn: document.getElementById("saveBtn"),
   downloadReportBtn: document.getElementById("downloadReportBtn"),
@@ -142,6 +159,145 @@ function hasMeaningfulText(text, minLength = 8) {
   if (/[A-Za-z]{6,}/.test(compact)) return true;
 
   return false;
+}
+
+function escapeHtml(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function getCurrentQuestion() {
+  if (state.currentQuestionIndex === null || state.currentQuestionIndex < 0) return null;
+  return state.questions[state.currentQuestionIndex] || null;
+}
+
+function clearScheduledFollowup() {
+  if (state.followupTimer) {
+    window.clearTimeout(state.followupTimer);
+    state.followupTimer = null;
+  }
+}
+
+function resetAssessmentView() {
+  state.assessment = null;
+  state.assessmentSource = "rule";
+  el.assessmentEmpty.classList.remove("hidden");
+  el.assessmentPanel.classList.add("hidden");
+  el.totalScore.textContent = "0";
+  el.hiringSuggestion.textContent = "-";
+  el.dimensionScores.innerHTML = "";
+  el.assessmentSummary.textContent = "";
+}
+
+function updateFollowupStatus(text, warn = false) {
+  el.followupStatus.textContent = text;
+  el.followupStatus.classList.toggle("warn", warn);
+}
+
+function renderPlainList(node, items, emptyText) {
+  node.innerHTML = "";
+
+  const values = Array.isArray(items) && items.length ? items : [emptyText];
+  values.forEach((item) => {
+    const li = document.createElement("li");
+    li.textContent = item;
+    node.appendChild(li);
+  });
+}
+
+function renderFollowupQuestions(items) {
+  el.followupQuestionList.innerHTML = "";
+
+  if (!Array.isArray(items) || !items.length) {
+    const li = document.createElement("li");
+    li.textContent = "当前回答已经比较完整，暂无新增追问。";
+    el.followupQuestionList.appendChild(li);
+    return;
+  }
+
+  items.forEach((item, index) => {
+    const li = document.createElement("li");
+    li.className = "followup-question-item";
+
+    const asked = state.followupAsked.includes(item);
+    const text = document.createElement("div");
+    text.className = "followup-question-text";
+    text.textContent = item;
+
+    const actions = document.createElement("div");
+    actions.className = "followup-actions";
+
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "ghost-btn";
+    copyBtn.dataset.action = "copy-followup";
+    copyBtn.dataset.index = String(index);
+    copyBtn.textContent = "复制";
+
+    const markBtn = document.createElement("button");
+    markBtn.type = "button";
+    markBtn.className = "ghost-btn";
+    markBtn.dataset.action = "mark-followup";
+    markBtn.dataset.index = String(index);
+    markBtn.textContent = asked ? "已追问" : "标记已问";
+    markBtn.disabled = asked;
+
+    actions.append(copyBtn, markBtn);
+    li.append(text, actions);
+    el.followupQuestionList.appendChild(li);
+  });
+}
+
+function renderFollowupState() {
+  const currentQuestion = getCurrentQuestion();
+  el.suggestFollowupBtn.disabled = !currentQuestion || !state.jobId;
+
+  if (!currentQuestion) {
+    el.currentQuestionPreview.textContent = "请先在题库中选择“设为当前题”";
+    el.followupEmpty.classList.remove("hidden");
+    el.followupPanel.classList.add("hidden");
+    el.followupCompleteness.textContent = "回答完整度：待分析";
+    updateFollowupStatus("状态：待选择题目");
+    return;
+  }
+
+  el.currentQuestionPreview.textContent = `${currentQuestion.type}｜${currentQuestion.question}`;
+
+  if (!state.followupAnalysis) {
+    el.followupEmpty.classList.remove("hidden");
+    el.followupPanel.classList.add("hidden");
+    el.followupEmpty.textContent = "当前题已选。开始转写或手工补充记录后，系统会自动识别风险点和建议追问。";
+    el.followupCompleteness.textContent = "回答完整度：待分析";
+    if (!/分析|刷新|失败|已更新|待填写/.test(el.followupStatus.textContent)) {
+      updateFollowupStatus("状态：待分析");
+    }
+    return;
+  }
+
+  el.followupEmpty.classList.add("hidden");
+  el.followupPanel.classList.remove("hidden");
+  el.followupCompleteness.textContent = state.followupAnalysis.answerComplete
+    ? "回答完整度：较完整"
+    : "回答完整度：仍需追问";
+
+  renderPlainList(el.followupRiskList, state.followupAnalysis.riskPoints, "暂无明显风险点");
+  renderPlainList(el.followupMissingList, state.followupAnalysis.missingInfo, "暂无明显信息缺口");
+  renderFollowupQuestions(state.followupAnalysis.followupQuestions);
+}
+
+function resetFollowupState({ keepQuestion = false } = {}) {
+  clearScheduledFollowup();
+  state.followupAnalysis = null;
+  state.followupAsked = [];
+  state.lastFollowupKey = "";
+  if (!keepQuestion) {
+    state.currentQuestionIndex = null;
+  }
+  renderFollowupState();
 }
 
 function collectJd() {
@@ -299,19 +455,45 @@ async function checkBackend() {
 function renderQuestions(questions) {
   el.questionBody.innerHTML = "";
 
-  questions.forEach((q) => {
+  questions.forEach((q, index) => {
     const tr = document.createElement("tr");
+    tr.className = index === state.currentQuestionIndex ? "question-row-active" : "";
     tr.innerHTML = `
-      <td>${q.type}</td>
-      <td>${q.question}</td>
-      <td>${q.focus}</td>
-      <td>${q.rubric}</td>
+      <td>${escapeHtml(q.type)}</td>
+      <td>${escapeHtml(q.question)}</td>
+      <td>${escapeHtml(q.focus)}</td>
+      <td>${escapeHtml(q.rubric)}</td>
+      <td>
+        <button
+          type="button"
+          class="table-action-btn${index === state.currentQuestionIndex ? " is-active" : ""}"
+          data-action="select-question"
+          data-index="${index}"
+        >
+          ${index === state.currentQuestionIndex ? "当前题" : "设为当前题"}
+        </button>
+      </td>
     `;
     el.questionBody.appendChild(tr);
   });
 
   el.questionEmpty.classList.add("hidden");
   el.questionTable.classList.remove("hidden");
+}
+
+function setActiveQuestion(index) {
+  if (!Number.isInteger(index) || index < 0 || index >= state.questions.length) {
+    return;
+  }
+
+  state.currentQuestionIndex = index;
+  state.followupAnalysis = null;
+  state.followupAsked = [];
+  state.lastFollowupKey = "";
+  updateFollowupStatus(`状态：已切换到第 ${index + 1} 题`);
+  renderQuestions(state.questions);
+  renderFollowupState();
+  scheduleFollowupAnalysis({ manual: false });
 }
 
 function setupSpeechRecognition() {
@@ -343,6 +525,7 @@ function setupSpeechRecognition() {
     }
 
     el.transcript.value = `${state.transcript}${interimText}`.trim();
+    scheduleFollowupAnalysis({ manual: false });
   };
 
   recognition.onerror = () => {
@@ -356,6 +539,7 @@ function setupSpeechRecognition() {
     if (!el.recStatus.classList.contains("warn")) {
       el.recStatus.textContent = "状态：已停止";
     }
+    scheduleFollowupAnalysis({ manual: false });
   };
 
   return recognition;
@@ -570,6 +754,134 @@ function exportArchiveAsCsv(records) {
 
   return `\uFEFF${headers.join(",")}\n${rows.join("\n")}`;
 }
+
+function buildInterviewContextKey(jobId, candidateName) {
+  return `${jobId || 0}::${String(candidateName || "").trim()}`;
+}
+
+async function ensureInterviewSession(candidateName) {
+  const contextKey = buildInterviewContextKey(state.jobId, candidateName);
+  if (state.lastInterviewId && state.interviewContextKey === contextKey) {
+    return state.lastInterviewId;
+  }
+
+  const interview = await apiFetch("/api/interviews", {
+    method: "POST",
+    body: {
+      jobId: state.jobId,
+      candidateName,
+      interviewerName: "网页端",
+    },
+  });
+
+  state.lastInterviewId = interview.interviewId;
+  state.interviewContextKey = contextKey;
+  return state.lastInterviewId;
+}
+
+function buildFollowupRequestKey(question, transcriptText, askedFollowups) {
+  return JSON.stringify({
+    question: question?.question || "",
+    focus: question?.focus || "",
+    transcript: transcriptText,
+    askedFollowups,
+  });
+}
+
+async function requestFollowupSuggestions({ manual = false } = {}) {
+  const currentQuestion = getCurrentQuestion();
+  const transcriptText = el.transcript.value.trim();
+  const candidateName = el.candidateName.value.trim();
+  const resumeText = el.resumeText.value.trim();
+  const jdText = el.jdText.value.trim();
+
+  if (!currentQuestion || !state.jobId) {
+    updateFollowupStatus("状态：请先生成题库并选择当前题", true);
+    renderFollowupState();
+    return;
+  }
+
+  if (isPlaceholderLike(candidateName) || candidateName.length < 2) {
+    updateFollowupStatus("状态：待填写候选人姓名", true);
+    if (manual) alert("请先填写真实候选人姓名，再分析追问建议");
+    return;
+  }
+
+  if (!hasMeaningfulText(transcriptText, 12)) {
+    updateFollowupStatus("状态：回答内容过短，暂不分析", true);
+    if (manual) alert("当前回答内容过短，先补充更完整的转写再分析");
+    return;
+  }
+
+  const askedFollowups = [...state.followupAsked];
+  const requestKey = buildFollowupRequestKey(currentQuestion, transcriptText, askedFollowups);
+  if (!manual && requestKey === state.lastFollowupKey) {
+    return;
+  }
+
+  const seq = state.followupRequestSeq + 1;
+  state.followupRequestSeq = seq;
+  setButtonBusy(el.suggestFollowupBtn, "分析中...", "分析回答并给追问建议", true);
+  updateFollowupStatus(manual ? "状态：分析当前回答中..." : "状态：静默窗口已到，正在刷新追问建议...");
+
+  try {
+    const interviewId = await ensureInterviewSession(candidateName);
+    const res = await apiFetch(`/api/interviews/${interviewId}/followups/suggest`, {
+      method: "POST",
+      body: {
+        currentQuestion: currentQuestion.question,
+        focus: currentQuestion.focus,
+        rubric: currentQuestion.rubric,
+        transcript: transcriptText,
+        resumeText,
+        jdText,
+        askedFollowups,
+      },
+    });
+
+    if (seq !== state.followupRequestSeq) return;
+
+    state.followupAnalysis = res.analysis || null;
+    state.lastFollowupKey = requestKey;
+    renderFollowupState();
+    updateFollowupStatus(`状态：已更新追问建议（${new Date().toLocaleTimeString()}）`);
+  } catch (error) {
+    if (seq !== state.followupRequestSeq) return;
+    state.followupAnalysis = null;
+    renderFollowupState();
+    updateFollowupStatus(`状态：追问分析失败 - ${error.message}`, true);
+    if (manual) alert(`追问分析失败：${error.message}`);
+  } finally {
+    if (seq === state.followupRequestSeq) {
+      setButtonBusy(el.suggestFollowupBtn, "分析中...", "分析回答并给追问建议", false);
+    }
+  }
+}
+
+function scheduleFollowupAnalysis({ manual = false } = {}) {
+  clearScheduledFollowup();
+
+  if (manual) {
+    requestFollowupSuggestions({ manual: true });
+    return;
+  }
+
+  if (!getCurrentQuestion() || !state.jobId) {
+    renderFollowupState();
+    return;
+  }
+
+  if (!hasMeaningfulText(el.transcript.value.trim(), 12)) {
+    renderFollowupState();
+    return;
+  }
+
+  updateFollowupStatus("状态：等待回答稳定后自动分析...");
+  state.followupTimer = window.setTimeout(() => {
+    requestFollowupSuggestions({ manual: false });
+  }, FOLLOWUP_DEBOUNCE_MS);
+}
+
 async function handleUpload(file, kind) {
   const ok = await checkBackend();
   if (!ok) {
@@ -642,6 +954,14 @@ el.resumeFile.addEventListener("change", async (event) => {
   await handleUpload(file, "resume");
 });
 
+el.questionBody.addEventListener("click", (event) => {
+  const button = event.target.closest('button[data-action="select-question"]');
+  if (!button) return;
+  const index = Number(button.dataset.index);
+  if (!Number.isInteger(index)) return;
+  setActiveQuestion(index);
+});
+
 el.generateBtn.addEventListener("click", async () => {
   const jd = collectJd();
   if (!jd) return;
@@ -668,6 +988,9 @@ el.generateBtn.addEventListener("click", async () => {
 
     state.jd = jd;
     state.jobId = jobRes.jobId;
+    state.lastInterviewId = null;
+    state.interviewContextKey = "";
+    resetAssessmentView();
 
     const questionRes = await apiFetch(`/api/jobs/${state.jobId}/questions/generate`, {
       method: "POST",
@@ -684,7 +1007,10 @@ el.generateBtn.addEventListener("click", async () => {
       rubric: item.rubric,
     }));
 
+    state.currentQuestionIndex = state.questions.length ? 0 : null;
+    resetFollowupState({ keepQuestion: state.currentQuestionIndex !== null });
     renderQuestions(state.questions);
+    renderFollowupState();
     alert(`题库生成成功，共 ${state.questions.length} 题（岗位ID: ${state.jobId}）`);
   } catch (error) {
     alert(`生成失败：${error.message}`);
@@ -720,6 +1046,50 @@ el.appendBtn.addEventListener("click", () => {
   el.transcript.value = nextValue;
   state.transcript = nextValue;
   el.manualAppend.value = "";
+  scheduleFollowupAnalysis({ manual: false });
+});
+
+el.transcript.addEventListener("input", () => {
+  state.transcript = el.transcript.value.trim();
+  scheduleFollowupAnalysis({ manual: false });
+});
+
+el.candidateName.addEventListener("input", () => {
+  state.lastInterviewId = null;
+  state.interviewContextKey = "";
+});
+
+el.suggestFollowupBtn.addEventListener("click", () => {
+  scheduleFollowupAnalysis({ manual: true });
+});
+
+el.followupQuestionList.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button || !state.followupAnalysis) return;
+
+  const index = Number(button.dataset.index);
+  const suggestion = state.followupAnalysis.followupQuestions?.[index];
+  if (!suggestion) return;
+
+  if (button.dataset.action === "copy-followup") {
+    try {
+      await navigator.clipboard.writeText(suggestion);
+      updateFollowupStatus(`状态：已复制追问（${new Date().toLocaleTimeString()}）`);
+    } catch {
+      updateFollowupStatus("状态：复制失败，请手工复制", true);
+    }
+    return;
+  }
+
+  if (button.dataset.action === "mark-followup") {
+    if (!state.followupAsked.includes(suggestion)) {
+      state.followupAsked.push(suggestion);
+      state.lastFollowupKey = "";
+      renderFollowupState();
+      updateFollowupStatus(`状态：已标记第 ${index + 1} 条追问为“已问”`);
+      scheduleFollowupAnalysis({ manual: false });
+    }
+  }
 });
 
 el.evaluateBtn.addEventListener("click", async () => {
@@ -761,16 +1131,7 @@ el.evaluateBtn.addEventListener("click", async () => {
   setButtonBusy(el.evaluateBtn, "评估中...", "生成初步评分与建议", true);
 
   try {
-    const interview = await apiFetch("/api/interviews", {
-      method: "POST",
-      body: {
-        jobId: state.jobId,
-        candidateName,
-        interviewerName: "网页端",
-      },
-    });
-
-    state.lastInterviewId = interview.interviewId;
+    state.lastInterviewId = await ensureInterviewSession(candidateName);
 
     await apiFetch(`/api/interviews/${state.lastInterviewId}/transcripts`, {
       method: "POST",
@@ -862,6 +1223,8 @@ el.exportJsonBtn.addEventListener("click", () => {
   downloadFile(fileName, jsonText, "application/json;charset=utf-8");
 });
 checkBackend();
+renderFollowupState();
+resetAssessmentView();
 renderArchive();
 
 
