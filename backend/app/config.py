@@ -27,6 +27,8 @@ class Settings:
     ai_model_question: str
     ai_model_eval: str
     ai_timeout_ms: int
+    ai_timeout_question_ms: int
+    ai_retry_count: int
     ai_force_json: bool
     ai_temperature: float | None
 
@@ -55,6 +57,8 @@ def get_settings() -> Settings:
         ai_model_question=os.getenv("AI_MODEL_QUESTION", "").strip(),
         ai_model_eval=os.getenv("AI_MODEL_EVAL", "").strip(),
         ai_timeout_ms=int(os.getenv("AI_TIMEOUT_MS", "20000")),
+        ai_timeout_question_ms=int(os.getenv("AI_TIMEOUT_QUESTION_MS", "240000")),
+        ai_retry_count=max(int(os.getenv("AI_RETRY_COUNT", "1")), 0),
         ai_force_json=_to_bool(os.getenv("AI_FORCE_JSON"), True),
         ai_temperature=float(os.getenv("AI_TEMPERATURE")) if os.getenv("AI_TEMPERATURE") else None,
     )

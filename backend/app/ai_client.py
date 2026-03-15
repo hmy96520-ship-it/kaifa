@@ -2,6 +2,7 @@
 
 import json
 import re
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -167,6 +168,8 @@ def resolve_ai_config(settings: Settings) -> dict[str, Any]:
         "model_question": model_question,
         "model_eval": model_eval,
         "timeout_s": max(settings.ai_timeout_ms, 1000) / 1000,
+        "question_timeout_s": max(settings.ai_timeout_question_ms, settings.ai_timeout_ms, 1000) / 1000,
+        "retry_count": max(settings.ai_retry_count, 0),
         "force_json": settings.ai_force_json,
         "temperature": temperature,
     }
@@ -184,13 +187,22 @@ def get_ai_status() -> dict[str, Any]:
     }
 
 
-def call_chat_completion(*, model: str, system_prompt: str, user_prompt: str) -> Any:
+def call_chat_completion(
+    *,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    timeout_s: float | None = None,
+    retry_count: int | None = None,
+) -> Any:
     settings = get_settings()
     cfg = resolve_ai_config(settings)
     if not cfg["enabled"]:
         raise RuntimeError("AI config missing")
     if not model:
         raise RuntimeError("AI model missing")
+    request_timeout_s = max(float(timeout_s or cfg["timeout_s"]), 1.0)
+    retries = max(int(cfg["retry_count"] if retry_count is None else retry_count), 0)
 
     payload: dict[str, Any] = {
         "model": model,
@@ -203,28 +215,47 @@ def call_chat_completion(*, model: str, system_prompt: str, user_prompt: str) ->
     if cfg["force_json"]:
         payload["response_format"] = {"type": "json_object"}
 
-    try:
-        response = httpx.post(
-            f"{cfg['base_url']}/chat/completions",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {cfg['api_key']}",
-            },
-            json=payload,
-            timeout=cfg["timeout_s"],
-        )
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        compact = re.sub(r"\s+", " ", exc.response.text or "")[:300]
-        raise RuntimeError(f"AI HTTP {exc.response.status_code}: {compact}") from exc
-    except httpx.RequestError as exc:
-        raise RuntimeError(str(exc) or exc.__class__.__name__) from exc
+    transport_timeout = httpx.Timeout(
+        connect=min(request_timeout_s, 20.0),
+        read=request_timeout_s,
+        write=min(request_timeout_s, 60.0),
+        pool=min(request_timeout_s, 60.0),
+    )
 
-    raw = response.json()
-    content = (((raw.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
-    if not content:
-        raise RuntimeError("AI empty content")
-    return parse_json_from_model_text(content)
+    for attempt in range(retries + 1):
+        try:
+            response = httpx.post(
+                f"{cfg['base_url']}/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {cfg['api_key']}",
+                },
+                json=payload,
+                timeout=transport_timeout,
+            )
+            response.raise_for_status()
+            raw = response.json()
+            content = (((raw.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+            if not content:
+                raise RuntimeError("AI empty content")
+            return parse_json_from_model_text(content)
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if attempt < retries and status_code in {408, 429, 500, 502, 503, 504}:
+                time.sleep(min(2 * (attempt + 1), 4))
+                continue
+            compact = re.sub(r"\s+", " ", exc.response.text or "")[:300]
+            raise RuntimeError(f"AI HTTP {status_code}: {compact}") from exc
+        except httpx.TimeoutException as exc:
+            if attempt < retries:
+                time.sleep(min(2 * (attempt + 1), 4))
+                continue
+            raise RuntimeError(f"AI request timed out after {int(request_timeout_s)}s") from exc
+        except httpx.RequestError as exc:
+            if attempt < retries:
+                time.sleep(min(2 * (attempt + 1), 4))
+                continue
+            raise RuntimeError(str(exc) or exc.__class__.__name__) from exc
 
 
 def generate_questions_by_ai(*, jd: dict[str, Any], resume_text: str) -> list[dict[str, str]]:
@@ -274,7 +305,13 @@ def generate_questions_by_ai(*, jd: dict[str, Any], resume_text: str) -> list[di
             "4. 优先使用输入中的原词或近义复述，不要泛化成通用HR/管理题。",
         ]
     )
-    raw = call_chat_completion(model=cfg["model_question"], system_prompt=system_prompt, user_prompt=user_prompt)
+    raw = call_chat_completion(
+        model=cfg["model_question"],
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        timeout_s=cfg["question_timeout_s"],
+        retry_count=cfg["retry_count"],
+    )
     questions = unique_questions(list(raw.get("questions") or []))
     if not questions:
         raise RuntimeError("AI returned empty questions")
