@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import uuid
 from contextlib import suppress
+from datetime import UTC, datetime
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
@@ -19,6 +21,7 @@ from .files import extract_text_from_file
 
 settings = get_settings()
 app = FastAPI(title="Studio HR Backend", version="0.2.0")
+question_generation_tasks: dict[str, dict[str, object]] = {}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -205,34 +208,46 @@ def parse_text(file: UploadFile = File(...)):
     return {"ok": True, "fileName": file.filename, "text": text[:30000]}
 
 
-@app.post("/api/jobs")
-async def create_job(request: Request):
-    payload = await request.json()
-    valid, message, jd = normalize_jd_payload(payload or {})
-    if not valid or jd is None:
-        raise HTTPException(status_code=400, detail=message)
-
-    job_id = db.execute(
-        """
-        INSERT INTO job_post (title, must_skills, nice_skills, responsibilities)
-        VALUES (%s, %s, %s, %s)
-        """,
-        (
-            jd["title"],
-            json.dumps(jd["mustSkills"], ensure_ascii=False),
-            json.dumps(jd["niceSkills"], ensure_ascii=False),
-            jd["responsibilities"],
-        ),
-    )
-    return JSONResponse(status_code=201, content={"ok": True, "jobId": job_id, "jd": jd})
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
-@app.post("/api/jobs/{job_id}/questions/generate")
-async def generate_questions(job_id: int, request: Request):
+def _serialize_question_task(task: dict[str, object]) -> dict[str, object]:
+    payload = {
+        "ok": True,
+        "taskId": task["taskId"],
+        "jobId": task["jobId"],
+        "status": task["status"],
+        "createdAt": task["createdAt"],
+        "updatedAt": task["updatedAt"],
+        "completedAt": task.get("completedAt"),
+        "error": task.get("error"),
+        "count": int(task.get("count") or 0),
+    }
+    if task.get("status") == "succeeded":
+        payload["source"] = "ai"
+        payload["questions"] = task.get("questions") or []
+    return payload
+
+
+def _replace_question_bank(job_id: int, questions: list[dict[str, str]]) -> None:
+    with db.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM question_bank WHERE job_post_id = %s", (job_id,))
+            for item in questions:
+                cur.execute(
+                    """
+                    INSERT INTO question_bank (job_post_id, category, question_text, focus, rubric)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (job_id, item["category"], item["questionText"], item["focus"], item["rubric"]),
+                )
+
+
+def _build_question_generation_context(job_id: int, body: dict[str, object]) -> tuple[dict[str, object], str]:
     if job_id <= 0:
         raise HTTPException(status_code=400, detail="invalid jobId")
 
-    body = await request.json()
     resume_text = str(body.get("resumeText") or "").strip()
     jd_text = str(body.get("jdText") or "").strip()
 
@@ -260,24 +275,103 @@ async def generate_questions(job_id: int, request: Request):
             detail="AI is disabled. Please configure AI_PROVIDER, AI_BASE_URL and AI_API_KEY.",
         )
 
+    return jd, resume_text
+
+
+async def _run_question_generation_task(task_id: str, job_id: int, jd: dict[str, object], resume_text: str) -> None:
+    task = question_generation_tasks.get(task_id)
+    if not task:
+        return
+
+    task["status"] = "running"
+    task["updatedAt"] = _utc_now_iso()
+
+    try:
+        questions = await asyncio.to_thread(generate_questions_by_ai, jd=jd, resume_text=resume_text)
+        await asyncio.to_thread(_replace_question_bank, job_id, questions)
+    except Exception as exc:
+        task["status"] = "failed"
+        task["updatedAt"] = _utc_now_iso()
+        task["completedAt"] = task["updatedAt"]
+        task["error"] = f"AI question generation failed: {exc}"
+        task["questions"] = []
+        task["count"] = 0
+        return
+
+    task["status"] = "succeeded"
+    task["updatedAt"] = _utc_now_iso()
+    task["completedAt"] = task["updatedAt"]
+    task["error"] = None
+    task["questions"] = questions
+    task["count"] = len(questions)
+
+
+@app.post("/api/jobs")
+async def create_job(request: Request):
+    payload = await request.json()
+    valid, message, jd = normalize_jd_payload(payload or {})
+    if not valid or jd is None:
+        raise HTTPException(status_code=400, detail=message)
+
+    job_id = db.execute(
+        """
+        INSERT INTO job_post (title, must_skills, nice_skills, responsibilities)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (
+            jd["title"],
+            json.dumps(jd["mustSkills"], ensure_ascii=False),
+            json.dumps(jd["niceSkills"], ensure_ascii=False),
+            jd["responsibilities"],
+        ),
+    )
+    return JSONResponse(status_code=201, content={"ok": True, "jobId": job_id, "jd": jd})
+
+
+@app.post("/api/jobs/{job_id}/questions/generate")
+async def generate_questions(job_id: int, request: Request):
+    body = await request.json()
+    jd, resume_text = _build_question_generation_context(job_id, body)
+
     try:
         questions = generate_questions_by_ai(jd=jd, resume_text=resume_text)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"AI question generation failed: {exc}") from exc
 
-    with db.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM question_bank WHERE job_post_id = %s", (job_id,))
-            for item in questions:
-                cur.execute(
-                    """
-                    INSERT INTO question_bank (job_post_id, category, question_text, focus, rubric)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (job_id, item["category"], item["questionText"], item["focus"], item["rubric"]),
-                )
+    _replace_question_bank(job_id, questions)
 
     return {"ok": True, "source": "ai", "count": len(questions), "questions": questions}
+
+
+@app.post("/api/jobs/{job_id}/questions/generate-async")
+async def generate_questions_async(job_id: int, request: Request):
+    body = await request.json()
+    jd, resume_text = _build_question_generation_context(job_id, body)
+
+    task_id = uuid.uuid4().hex
+    now = _utc_now_iso()
+    question_generation_tasks[task_id] = {
+        "taskId": task_id,
+        "jobId": job_id,
+        "status": "queued",
+        "createdAt": now,
+        "updatedAt": now,
+        "completedAt": None,
+        "error": None,
+        "questions": [],
+        "count": 0,
+    }
+
+    asyncio.create_task(_run_question_generation_task(task_id, job_id, jd, resume_text))
+    return JSONResponse(status_code=202, content=_serialize_question_task(question_generation_tasks[task_id]))
+
+
+@app.get("/api/jobs/{job_id}/questions/generate-async/{task_id}")
+def get_question_generation_task(job_id: int, task_id: str):
+    task = question_generation_tasks.get(task_id)
+    if not task or int(task.get("jobId") or 0) != job_id:
+        raise HTTPException(status_code=404, detail="generation task not found")
+    return _serialize_question_task(task)
 
 
 @app.get("/api/jobs/{job_id}/questions")

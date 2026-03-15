@@ -561,6 +561,10 @@ async function apiFetch(path, options = {}) {
   return data;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 async function apiFormFetch(path, formData) {
   const response = await fetch(`${API_BASE}${path}`, {
     method: "POST",
@@ -583,6 +587,29 @@ async function apiFormFetch(path, formData) {
   }
 
   return data;
+}
+
+async function pollQuestionGenerationTask(jobId, taskId, { timeoutMs = 240000, intervalMs = 2500 } = {}) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const result = await apiFetch(`/api/jobs/${jobId}/questions/generate-async/${taskId}`);
+    const status = String(result.status || "").trim();
+
+    if (status === "queued") {
+      setGenerateStatus("状态：任务已创建，正在排队...", "loading");
+    } else if (status === "running") {
+      setGenerateStatus("状态：AI 正在生成题库，通常需要 20-90 秒...", "loading");
+    } else if (status === "succeeded") {
+      return result;
+    } else if (status === "failed") {
+      throw new Error(result.error || "题库生成失败");
+    }
+
+    await sleep(intervalMs);
+  }
+
+  throw new Error("题库生成超时，请稍后重试");
 }
 
 async function uploadFileForText(file) {
@@ -1645,15 +1672,16 @@ el.generateBtn.addEventListener("click", async () => {
     state.lastInterviewId = null;
     state.interviewContextKey = "";
     resetAssessmentView();
-    setGenerateStatus("状态：AI 正在生成题库，通常需要 20-90 秒...", "loading");
+    setGenerateStatus("状态：正在创建生成任务...", "loading");
 
-    const questionRes = await apiFetch(`/api/jobs/${state.jobId}/questions/generate`, {
+    const taskRes = await apiFetch(`/api/jobs/${state.jobId}/questions/generate-async`, {
       method: "POST",
       body: {
         resumeText: jd.resumeText,
         jdText: jd.jdText,
       },
     });
+    const questionRes = await pollQuestionGenerationTask(state.jobId, taskRes.taskId);
 
     state.questions = (questionRes.questions || []).map((item) => ({
       type: item.category,
