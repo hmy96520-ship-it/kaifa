@@ -31,6 +31,16 @@ class Settings:
     ai_retry_count: int
     ai_force_json: bool
     ai_temperature: float | None
+    asr_ws_url: str
+    asr_api_key: str
+    asr_model: str
+    asr_format: str
+    asr_sample_rate: int
+    asr_vocabulary_id: str
+    asr_workspace: str
+    asr_language_hints: str
+    asr_disfluency_removal_enabled: bool
+    asr_connect_timeout_ms: int
 
 
 def _to_bool(value: str | None, default: bool = False) -> bool:
@@ -61,4 +71,14 @@ def get_settings() -> Settings:
         ai_retry_count=max(int(os.getenv("AI_RETRY_COUNT", "1")), 0),
         ai_force_json=_to_bool(os.getenv("AI_FORCE_JSON"), True),
         ai_temperature=float(os.getenv("AI_TEMPERATURE")) if os.getenv("AI_TEMPERATURE") else None,
+        asr_ws_url=os.getenv("ASR_WS_URL", "wss://dashscope-intl.aliyuncs.com/api-ws/v1/inference/").strip(),
+        asr_api_key=os.getenv("ASR_API_KEY", "").strip(),
+        asr_model=os.getenv("ASR_MODEL", "fun-asr-realtime").strip(),
+        asr_format=os.getenv("ASR_FORMAT", "pcm").strip().lower(),
+        asr_sample_rate=int(os.getenv("ASR_SAMPLE_RATE", "16000")),
+        asr_vocabulary_id=os.getenv("ASR_VOCABULARY_ID", "").strip(),
+        asr_workspace=os.getenv("ASR_WORKSPACE", "").strip(),
+        asr_language_hints=os.getenv("ASR_LANGUAGE_HINTS", "zh").strip(),
+        asr_disfluency_removal_enabled=_to_bool(os.getenv("ASR_DISFLUENCY_REMOVAL_ENABLED"), False),
+        asr_connect_timeout_ms=int(os.getenv("ASR_CONNECT_TIMEOUT_MS", "10000")),
     )

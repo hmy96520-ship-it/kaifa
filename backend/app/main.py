@@ -1,14 +1,17 @@
 ﻿from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import suppress
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .ai_client import evaluate_by_ai, generate_questions_by_ai, get_ai_status, suggest_followups_by_ai
+from .asr_client import AliyunRealtimeAsrSession, get_asr_status
 from .config import get_settings
 from .db import db
 from .domain import has_meaningful_text, normalize_jd_payload, safe_json_array
@@ -59,12 +62,139 @@ async def handle_exception(_request: Request, exc: Exception):
 @app.get("/api/health")
 def health():
     row = db.fetch_one("SELECT 1 AS ok")
-    return {"ok": True, "db": bool(row and row.get("ok") == 1), "ai": get_ai_status()}
+    return {"ok": True, "db": bool(row and row.get("ok") == 1), "ai": get_ai_status(), "asr": get_asr_status()}
 
 
 @app.get("/api/ai/status")
 def ai_status():
     return {"ok": True, "ai": get_ai_status()}
+
+
+@app.get("/api/asr/status")
+def asr_status():
+    return {"ok": True, "asr": get_asr_status()}
+
+
+async def _forward_frontend_audio(frontend_ws: WebSocket, asr_session: AliyunRealtimeAsrSession):
+    while True:
+        message = await frontend_ws.receive()
+        msg_type = message.get("type")
+
+        if msg_type == "websocket.disconnect":
+            await asr_session.finish()
+            return "frontend-disconnected"
+
+        chunk = message.get("bytes")
+        if chunk:
+            await asr_session.send_audio(chunk)
+            continue
+
+        text = message.get("text")
+        if not text:
+            continue
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Invalid ASR websocket message from browser") from exc
+
+        event_type = str(payload.get("type") or "").strip()
+        if event_type == "stop":
+            await asr_session.finish()
+            return "client-stopped"
+        if event_type == "ping":
+            await frontend_ws.send_json({"type": "pong"})
+
+
+async def _forward_asr_events(frontend_ws: WebSocket, asr_session: AliyunRealtimeAsrSession):
+    while True:
+        event = await asr_session.next_event()
+        if not event:
+            continue
+        await frontend_ws.send_json(event)
+        if event["type"] == "finished":
+            return "finished"
+
+
+@app.websocket("/api/asr/realtime")
+async def asr_realtime(frontend_ws: WebSocket):
+    await frontend_ws.accept()
+
+    asr = get_asr_status()
+    if not asr["enabled"]:
+        await frontend_ws.send_json(
+            {
+                "type": "error",
+                "message": "ASR is disabled. Please configure ASR_API_KEY and ASR_MODEL.",
+            }
+        )
+        await frontend_ws.close(code=1011)
+        return
+
+    asr_session: AliyunRealtimeAsrSession | None = None
+    browser_task: asyncio.Task[str] | None = None
+    asr_task: asyncio.Task[str] | None = None
+
+    try:
+        start_payload = await frontend_ws.receive_json()
+        if str(start_payload.get("type") or "").strip() != "start":
+            raise RuntimeError("First websocket message must be type=start")
+
+        asr_session = await AliyunRealtimeAsrSession.connect()
+        await frontend_ws.send_json(
+            {
+                "type": "ready",
+                "provider": asr["provider"],
+                "model": asr["model"],
+                "sampleRate": asr["sampleRate"],
+                "format": asr["format"],
+                "sessionId": str(start_payload.get("sessionId") or ""),
+            }
+        )
+
+        browser_task = asyncio.create_task(_forward_frontend_audio(frontend_ws, asr_session))
+        asr_task = asyncio.create_task(_forward_asr_events(frontend_ws, asr_session))
+
+        done, pending = await asyncio.wait({browser_task, asr_task}, return_when=asyncio.FIRST_COMPLETED)
+
+        for task in done:
+            task.result()
+
+        if browser_task in done and asr_task and not asr_task.done():
+            try:
+                await asyncio.wait_for(asr_task, timeout=8)
+            except asyncio.TimeoutError:
+                asr_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await asr_task
+
+        for task in pending:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+    except WebSocketDisconnect:
+        if asr_session:
+            with suppress(Exception):
+                await asr_session.finish()
+    except Exception as exc:
+        with suppress(Exception):
+            await frontend_ws.send_json({"type": "error", "message": str(exc)})
+    finally:
+        if browser_task and not browser_task.done():
+            browser_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await browser_task
+        if asr_task and not asr_task.done():
+            asr_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await asr_task
+        if asr_session:
+            with suppress(Exception):
+                await asr_session.finish()
+            with suppress(Exception):
+                await asr_session.close()
+        with suppress(Exception):
+            await frontend_ws.close()
 
 
 @app.post("/api/files/parse-text")

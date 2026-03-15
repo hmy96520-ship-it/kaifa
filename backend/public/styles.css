@@ -211,6 +211,22 @@ button:disabled {
   margin-bottom: 8px;
 }
 
+.rec-meta {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.rec-meta .status {
+  margin-bottom: 0;
+}
+
+.rec-preview {
+  min-height: 20px;
+}
+
 .hint {
   color: var(--muted);
   margin: 6px 0 12px;
@@ -461,6 +477,10 @@ th {
 
   .primary-action .status-pill {
     min-width: 0;
+  }
+
+  .rec-meta {
+    align-items: stretch;
   }
 
   .followup-top {

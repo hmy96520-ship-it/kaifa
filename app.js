@@ -6,6 +6,13 @@ const API_BASE = IS_FILE_MODE
   : HAS_EXPLICIT_PORT && !IS_BACKEND_PORT
     ? `http://${window.location.hostname}:3001`
     : "";
+const WS_BASE = (() => {
+  if (IS_FILE_MODE) return "ws://localhost:3001";
+  if (API_BASE) {
+    return API_BASE.replace(/^http/i, "ws");
+  }
+  return window.location.origin.replace(/^http/i, "ws");
+})();
 const ARCHIVE_KEY = "studio_hr_records";
 const COMMON_SKILLS = [
   "摄影",
@@ -31,6 +38,9 @@ const COMMON_SKILLS = [
   "妆造协同",
   "引导拍摄",
 ];
+const RECORDING_BACKUP_CHUNK_MS = 4000;
+const PCM_SAMPLE_RATE = 16000;
+const PCM_PACKET_BYTES = 3200;
 
 const state = {
   jd: null,
@@ -41,7 +51,24 @@ const state = {
   assessmentSource: "rule",
   lastInterviewId: null,
   interviewContextKey: "",
+  asr: { enabled: false },
   recognition: null,
+  recorder: null,
+  mediaStream: null,
+  audioContext: null,
+  audioSource: null,
+  audioProcessor: null,
+  audioSink: null,
+  realtimeSocket: null,
+  realtimeReady: false,
+  realtimeSendBuffer: new Uint8Array(0),
+  realtimePartialText: "",
+  realtimeReconnectAvailable: false,
+  recordingMode: "detecting",
+  recordingMimeType: "",
+  recordingSessionId: "",
+  recordingChunks: [],
+  isRecording: false,
   currentQuestionIndex: null,
   followupByQuestion: {},
 };
@@ -63,7 +90,11 @@ const el = {
   candidateName: document.getElementById("candidateName"),
   startRecBtn: document.getElementById("startRecBtn"),
   stopRecBtn: document.getElementById("stopRecBtn"),
+  restartRealtimeBtn: document.getElementById("restartRealtimeBtn"),
+  downloadAudioBtn: document.getElementById("downloadAudioBtn"),
   recStatus: document.getElementById("recStatus"),
+  recMode: document.getElementById("recMode"),
+  recPreview: document.getElementById("recPreview"),
   transcript: document.getElementById("transcript"),
   manualAppend: document.getElementById("manualAppend"),
   appendBtn: document.getElementById("appendBtn"),
@@ -427,6 +458,82 @@ function setGenerateStatus(text, tone = "idle") {
   }
 }
 
+function setRecordingModeStatus(text, tone = "idle") {
+  setPillStatus(el.recMode, text, tone === "good", tone === "bad");
+  if (tone === "loading") {
+    el.recMode.classList.add("loading");
+  }
+}
+
+function setRecordingStatus(text, warn = false) {
+  el.recStatus.textContent = text;
+  el.recStatus.classList.toggle("warn", warn);
+}
+
+function browserSpeechSupported() {
+  return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+}
+
+function mediaRecorderSupported() {
+  return Boolean(window.MediaRecorder && navigator.mediaDevices?.getUserMedia);
+}
+
+function realtimeStreamingSupported() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  return Boolean(AudioContextClass && AudioContextClass.prototype?.createScriptProcessor);
+}
+
+function createRecordingSessionId() {
+  if (window.crypto?.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+  return `rec-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function chooseRecordingMimeType() {
+  if (!window.MediaRecorder?.isTypeSupported) {
+    return "audio/webm";
+  }
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/mp4",
+  ];
+  return candidates.find((item) => window.MediaRecorder.isTypeSupported(item)) || "";
+}
+
+function getRecordingMode() {
+  if (state.asr?.enabled && mediaRecorderSupported() && realtimeStreamingSupported()) return "managed";
+  if (browserSpeechSupported()) return "browser";
+  if (mediaRecorderSupported()) return "record-only";
+  return "manual";
+}
+
+function updateRecordingUi({ preserveStatus = false } = {}) {
+  if (state.isRecording) return;
+
+  state.recordingMode = getRecordingMode();
+  if (state.recordingMode === "managed") {
+    setRecordingModeStatus("转写模式：阿里云实时转写 + 录音备份", "good");
+    if (!preserveStatus) setRecordingStatus("状态：待开始");
+  } else if (state.recordingMode === "browser") {
+    setRecordingModeStatus("转写模式：浏览器兼容模式", "bad");
+    if (!preserveStatus) setRecordingStatus("状态：待开始（兼容模式）");
+  } else if (state.recordingMode === "record-only") {
+    setRecordingModeStatus("转写模式：仅录音备份", "bad");
+    if (!preserveStatus) setRecordingStatus("状态：当前环境仅支持录音备份", true);
+  } else {
+    setRecordingModeStatus("转写模式：仅手工记录", "bad");
+    if (!preserveStatus) setRecordingStatus("状态：当前环境不支持录音，请手工记录", true);
+  }
+
+  el.startRecBtn.disabled = state.recordingMode === "manual";
+  el.stopRecBtn.disabled = true;
+  el.restartRealtimeBtn.disabled = true;
+  el.downloadAudioBtn.disabled = !state.recordingChunks.length;
+}
+
 async function apiFetch(path, options = {}) {
   const method = options.method || "GET";
   const headers = { ...(options.headers || {}) };
@@ -438,6 +545,30 @@ async function apiFetch(path, options = {}) {
   }
 
   const response = await fetch(`${API_BASE}${path}`, init);
+  const raw = await response.text();
+  let data = null;
+
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = { message: raw };
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(data?.message || `HTTP ${response.status}`);
+  }
+
+  return data;
+}
+
+async function apiFormFetch(path, formData) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    body: formData,
+  });
+
   const raw = await response.text();
   let data = null;
 
@@ -486,16 +617,23 @@ async function uploadFileForText(file) {
 async function checkBackend() {
   try {
     const health = await apiFetch("/api/health");
+    state.asr = health.asr || { enabled: false };
     if (health.ok && health.db) {
       const aiLabel = health.ai?.enabled ? "AI:开" : "AI:关";
-      setBackendStatus(true, `后端：已连接 (${aiLabel})`);
+      const asrLabel = health.asr?.enabled ? "ASR:开" : "ASR:关";
+      setBackendStatus(true, `后端：已连接 (${aiLabel} / ${asrLabel})`);
+      updateRecordingUi();
       return true;
     }
 
+    state.asr = { enabled: false };
     setBackendStatus(false, "后端：未就绪");
+    updateRecordingUi();
     return false;
   } catch {
+    state.asr = { enabled: false };
     setBackendStatus(false, "后端：连接失败，请先启动 backend");
+    updateRecordingUi();
     return false;
   }
 }
@@ -545,6 +683,488 @@ function setActiveQuestion(index) {
   renderFollowupState();
 }
 
+function guessAudioExtension(mimeType) {
+  const value = String(mimeType || "").toLowerCase();
+  if (value.includes("webm")) return "webm";
+  if (value.includes("ogg")) return "ogg";
+  if (value.includes("mp4") || value.includes("m4a")) return "m4a";
+  if (value.includes("wav")) return "wav";
+  return "webm";
+}
+
+function clearRecordingArtifacts() {
+  state.recordingSessionId = "";
+  state.recordingChunks = [];
+  state.recordingMimeType = "";
+  state.realtimeSendBuffer = new Uint8Array(0);
+  state.realtimePartialText = "";
+  state.realtimeReconnectAvailable = false;
+  el.restartRealtimeBtn.disabled = true;
+  el.downloadAudioBtn.disabled = true;
+  if (el.recPreview) {
+    el.recPreview.textContent = "识别预览：等待开始";
+  }
+}
+
+function stopMediaStream() {
+  if (!state.mediaStream) return;
+  for (const track of state.mediaStream.getTracks()) {
+    track.stop();
+  }
+  state.mediaStream = null;
+}
+
+function stopAudioPipeline() {
+  if (state.audioProcessor) {
+    try {
+      state.audioProcessor.disconnect();
+    } catch {}
+  }
+  if (state.audioSource) {
+    try {
+      state.audioSource.disconnect();
+    } catch {}
+  }
+  if (state.audioSink) {
+    try {
+      state.audioSink.disconnect();
+    } catch {}
+  }
+  if (state.audioContext) {
+    try {
+      state.audioContext.close();
+    } catch {}
+  }
+
+  state.audioProcessor = null;
+  state.audioSource = null;
+  state.audioSink = null;
+  state.audioContext = null;
+}
+
+function closeRealtimeSocket() {
+  const socket = state.realtimeSocket;
+  state.realtimeSocket = null;
+  state.realtimeReady = false;
+  state.realtimeSendBuffer = new Uint8Array(0);
+  if (!socket) return;
+  try {
+    socket.close();
+  } catch {}
+}
+
+function concatUint8Arrays(first, second) {
+  const left = first instanceof Uint8Array ? first : new Uint8Array(first || []);
+  const right = second instanceof Uint8Array ? second : new Uint8Array(second || []);
+  const merged = new Uint8Array(left.length + right.length);
+  merged.set(left, 0);
+  merged.set(right, left.length);
+  return merged;
+}
+
+function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
+  if (outputSampleRate >= inputSampleRate) {
+    return buffer;
+  }
+
+  const ratio = inputSampleRate / outputSampleRate;
+  const newLength = Math.max(1, Math.round(buffer.length / ratio));
+  const result = new Float32Array(newLength);
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+    let accum = 0;
+    let count = 0;
+
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i += 1) {
+      accum += buffer[i];
+      count += 1;
+    }
+
+    result[offsetResult] = count ? accum / count : buffer[offsetBuffer] || 0;
+    offsetResult += 1;
+    offsetBuffer = nextOffsetBuffer;
+  }
+
+  return result;
+}
+
+function floatTo16BitPcm(floatBuffer) {
+  const pcm = new Int16Array(floatBuffer.length);
+  for (let i = 0; i < floatBuffer.length; i += 1) {
+    const sample = Math.max(-1, Math.min(1, floatBuffer[i]));
+    pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+  return new Uint8Array(pcm.buffer);
+}
+
+function buildPcmPacket(floatBuffer, inputSampleRate) {
+  const mono = downsampleBuffer(floatBuffer, inputSampleRate, PCM_SAMPLE_RATE);
+  return floatTo16BitPcm(mono);
+}
+
+function updateRealtimePreview(text) {
+  state.realtimePartialText = String(text || "").trim();
+  if (!el.recPreview) return;
+  el.recPreview.textContent = state.realtimePartialText
+    ? `识别预览：${state.realtimePartialText}`
+    : "识别预览：等待下一句";
+}
+
+function flushRealtimeBuffer() {
+  if (!state.realtimeReady || !state.realtimeSocket || state.realtimeSocket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  while (state.realtimeSendBuffer.length >= PCM_PACKET_BYTES) {
+    const packet = state.realtimeSendBuffer.slice(0, PCM_PACKET_BYTES);
+    state.realtimeSendBuffer = state.realtimeSendBuffer.slice(PCM_PACKET_BYTES);
+    state.realtimeSocket.send(packet.buffer);
+  }
+}
+
+function waitForRealtimeFinished(socket, timeoutMs = 4000) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      socket.removeEventListener("message", handleMessage);
+      socket.removeEventListener("close", finish);
+      window.clearTimeout(timer);
+      resolve();
+    };
+
+    const handleMessage = (event) => {
+      if (typeof event.data !== "string") return;
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === "finished" || payload.type === "error") {
+          finish();
+        }
+      } catch {}
+    };
+
+    const timer = window.setTimeout(finish, timeoutMs);
+    socket.addEventListener("message", handleMessage);
+    socket.addEventListener("close", finish);
+  });
+}
+
+function queueRealtimePcm(pcmChunk) {
+  state.realtimeSendBuffer = concatUint8Arrays(state.realtimeSendBuffer, pcmChunk);
+  if (!state.realtimeReady && state.realtimeSendBuffer.length > PCM_PACKET_BYTES * 10) {
+    state.realtimeSendBuffer = state.realtimeSendBuffer.slice(-PCM_PACKET_BYTES * 10);
+  }
+  flushRealtimeBuffer();
+}
+
+function handleRealtimeResult(payload) {
+  const text = String(payload?.text || "").trim();
+  if (!text) return;
+
+  if (payload.sentenceEnd) {
+    appendTranscriptText(text);
+    updateRealtimePreview("");
+    if (state.isRecording) {
+      setRecordingStatus("状态：录音中，正在实时转写...");
+    }
+    return;
+  }
+
+  updateRealtimePreview(text);
+}
+
+function buildRealtimeSocketUrl() {
+  return `${WS_BASE}/api/asr/realtime`;
+}
+
+function connectRealtimeSocket({ manualReconnect = false } = {}) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(buildRealtimeSocketUrl());
+    state.realtimeSocket = socket;
+    state.realtimeReady = false;
+    state.realtimeReconnectAvailable = false;
+    el.restartRealtimeBtn.disabled = true;
+
+    socket.binaryType = "arraybuffer";
+
+    socket.onopen = () => {
+      socket.send(
+        JSON.stringify({
+          type: "start",
+          sessionId: state.recordingSessionId || "",
+        })
+      );
+    };
+
+    socket.onmessage = (event) => {
+      if (typeof event.data !== "string") {
+        return;
+      }
+
+      let payload = {};
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+
+      if (payload.type === "ready") {
+        state.realtimeReady = true;
+        state.realtimeReconnectAvailable = false;
+        el.restartRealtimeBtn.disabled = true;
+        flushRealtimeBuffer();
+        setRecordingStatus(
+          manualReconnect ? "状态：实时转写已重连，继续识别中..." : "状态：录音中，实时转写已连接"
+        );
+        resolve(payload);
+        return;
+      }
+
+      if (payload.type === "result") {
+        handleRealtimeResult(payload);
+        return;
+      }
+
+      if (payload.type === "finished") {
+        state.realtimeReady = false;
+        state.realtimeReconnectAvailable = false;
+        el.restartRealtimeBtn.disabled = true;
+        updateRealtimePreview("");
+        if (state.isRecording) {
+          setRecordingStatus("状态：录音停止中，正在收尾最后一段...");
+        }
+        return;
+      }
+
+      if (payload.type === "error") {
+        state.realtimeReady = false;
+        state.realtimeReconnectAvailable = state.isRecording;
+        el.restartRealtimeBtn.disabled = !state.isRecording;
+        updateRealtimePreview("");
+        setRecordingStatus(`状态：实时转写断开 - ${payload.message}`, true);
+        reject(new Error(payload.message || "Realtime ASR failed"));
+      }
+    };
+
+    socket.onerror = () => {
+      state.realtimeReady = false;
+      state.realtimeReconnectAvailable = state.isRecording;
+      el.restartRealtimeBtn.disabled = !state.isRecording;
+      updateRealtimePreview("");
+      reject(new Error("无法建立实时转写连接"));
+    };
+
+    socket.onclose = () => {
+      const wasCurrent = state.realtimeSocket === socket;
+      if (!wasCurrent) return;
+
+      state.realtimeSocket = null;
+      state.realtimeReady = false;
+      if (state.isRecording) {
+        state.realtimeReconnectAvailable = true;
+        el.restartRealtimeBtn.disabled = false;
+        updateRealtimePreview("");
+        setRecordingStatus("状态：实时转写连接已断开，录音备份仍在继续，可点“重连实时转写”", true);
+      }
+    };
+  });
+}
+
+function mergeTranscriptText(currentText, nextText) {
+  const current = String(currentText || "").trim();
+  const next = String(nextText || "").trim();
+  if (!next) return current;
+  if (!current) return next;
+
+  const maxOverlap = Math.min(24, current.length, next.length);
+  for (let size = maxOverlap; size >= 6; size -= 1) {
+    if (current.slice(-size) === next.slice(0, size)) {
+      return `${current}${next.slice(size)}`.trim();
+    }
+  }
+
+  return `${current} ${next}`.trim();
+}
+
+function appendTranscriptText(nextText) {
+  const merged = mergeTranscriptText(el.transcript.value, nextText);
+  el.transcript.value = merged;
+  state.transcript = merged;
+  handleTranscriptChanged();
+}
+
+async function restartRealtimeStreaming() {
+  if (!state.isRecording) {
+    setRecordingStatus("状态：当前未在录音，无需重连实时转写");
+    el.restartRealtimeBtn.disabled = true;
+    return;
+  }
+
+  if (!state.realtimeReconnectAvailable) {
+    setRecordingStatus("状态：实时转写连接正常，无需重连");
+    el.restartRealtimeBtn.disabled = true;
+    return;
+  }
+
+  setButtonBusy(el.restartRealtimeBtn, "重连中...", "重连实时转写", true);
+  setRecordingStatus("状态：正在重连实时转写...");
+
+  try {
+    closeRealtimeSocket();
+    await connectRealtimeSocket({ manualReconnect: true });
+  } catch (error) {
+    setRecordingStatus(`状态：重连失败 - ${error.message}`, true);
+    state.realtimeReconnectAvailable = true;
+  } finally {
+    el.restartRealtimeBtn.disabled = !state.realtimeReconnectAvailable;
+    setButtonBusy(el.restartRealtimeBtn, "重连中...", "重连实时转写", false);
+  }
+}
+
+function downloadRecordingBackup() {
+  if (!state.recordingChunks.length) {
+    alert("当前还没有录音备份");
+    return;
+  }
+
+  const mimeType = state.recordingMimeType || state.recordingChunks[0]?.blob?.type || "audio/webm";
+  const extension = guessAudioExtension(mimeType);
+  const combinedBlob = new Blob(state.recordingChunks.map((item) => item.blob), { type: mimeType });
+  const fileName = `面试录音备份_${buildTimestampForFile()}.${extension}`;
+  downloadFile(fileName, combinedBlob, mimeType);
+}
+
+async function startManagedRecording({ transcribeChunks = true } = {}) {
+  if (!mediaRecorderSupported()) {
+    setRecordingStatus("状态：当前浏览器不支持稳定录音，请改为手工记录", true);
+    return;
+  }
+
+  clearRecordingArtifacts();
+  closeRealtimeSocket();
+  stopAudioPipeline();
+  stopMediaStream();
+  state.recorder = null;
+  state.recordingMode = transcribeChunks ? "managed" : "record-only";
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = chooseRecordingMimeType();
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    const audioContext = AudioContextClass ? new AudioContextClass() : null;
+
+    state.mediaStream = stream;
+    state.recorder = recorder;
+    state.audioContext = audioContext;
+    state.recordingMimeType = recorder.mimeType || mimeType || "audio/webm";
+    state.recordingSessionId = createRecordingSessionId();
+    state.isRecording = true;
+
+    el.startRecBtn.disabled = true;
+    el.stopRecBtn.disabled = true;
+    el.restartRealtimeBtn.disabled = true;
+    el.downloadAudioBtn.disabled = true;
+
+    setRecordingModeStatus(
+      transcribeChunks ? "转写模式：阿里云实时转写 + 录音备份" : "转写模式：仅录音备份",
+      transcribeChunks ? "good" : "bad"
+    );
+    updateRealtimePreview("");
+    setRecordingStatus(transcribeChunks ? "状态：正在建立实时转写连接..." : "状态：录音中，正在保留录音备份");
+
+    recorder.ondataavailable = (event) => {
+      if (!event.data || !event.data.size) return;
+      state.recordingChunks.push({ blob: event.data });
+      el.downloadAudioBtn.disabled = false;
+    };
+
+    recorder.onerror = () => {
+      setRecordingStatus("状态：录音异常，请停止后重试或下载录音备份", true);
+    };
+
+    recorder.onstop = async () => {
+      state.isRecording = false;
+      el.startRecBtn.disabled = false;
+      el.stopRecBtn.disabled = true;
+      state.realtimeReconnectAvailable = false;
+      el.restartRealtimeBtn.disabled = true;
+      updateRealtimePreview("");
+
+      const activeSocket = state.realtimeSocket;
+      flushRealtimeBuffer();
+      if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+        if (state.realtimeSendBuffer.length > 0) {
+          activeSocket.send(state.realtimeSendBuffer.buffer.slice(0));
+          state.realtimeSendBuffer = new Uint8Array(0);
+        }
+        activeSocket.send(JSON.stringify({ type: "stop" }));
+        await waitForRealtimeFinished(activeSocket);
+      }
+
+      closeRealtimeSocket();
+      stopAudioPipeline();
+      stopMediaStream();
+      state.recorder = null;
+      setRecordingStatus(transcribeChunks ? "状态：录音已停止，已保留实时转写结果和录音备份" : "状态：录音已停止，已保留录音备份");
+      el.downloadAudioBtn.disabled = !state.recordingChunks.length;
+      updateRecordingUi({ preserveStatus: true });
+      handleTranscriptChanged();
+    };
+
+    if (transcribeChunks) {
+      if (!audioContext || typeof audioContext.createScriptProcessor !== "function") {
+        throw new Error("当前浏览器不支持实时 PCM 采集");
+      }
+
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
+
+      await connectRealtimeSocket();
+
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      const sink = audioContext.createGain();
+      sink.gain.value = 0;
+      processor.onaudioprocess = (event) => {
+        if (!state.isRecording) return;
+        const inputBuffer = event.inputBuffer.getChannelData(0);
+        const pcmChunk = buildPcmPacket(inputBuffer, audioContext.sampleRate);
+        queueRealtimePcm(pcmChunk);
+      };
+
+      source.connect(processor);
+      processor.connect(sink);
+      sink.connect(audioContext.destination);
+
+      state.audioSource = source;
+      state.audioProcessor = processor;
+      state.audioSink = sink;
+    }
+
+    recorder.start(RECORDING_BACKUP_CHUNK_MS);
+    el.stopRecBtn.disabled = false;
+  } catch (error) {
+    state.isRecording = false;
+    closeRealtimeSocket();
+    stopAudioPipeline();
+    stopMediaStream();
+    state.recorder = null;
+    updateRecordingUi();
+    setRecordingStatus(`状态：无法启动录音 - ${error.message}`, true);
+  }
+}
+
 function setupSpeechRecognition() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) return null;
@@ -555,8 +1175,10 @@ function setupSpeechRecognition() {
   recognition.interimResults = true;
 
   recognition.onstart = () => {
-    el.recStatus.textContent = "状态：转写中";
-    el.recStatus.classList.remove("warn");
+    state.isRecording = true;
+    state.recordingMode = "browser";
+    setRecordingModeStatus("转写模式：浏览器兼容模式", "bad");
+    setRecordingStatus("状态：转写中（兼容模式）");
     el.startRecBtn.disabled = true;
     el.stopRecBtn.disabled = false;
   };
@@ -567,27 +1189,28 @@ function setupSpeechRecognition() {
     for (let i = event.resultIndex; i < event.results.length; i += 1) {
       const piece = event.results[i][0].transcript;
       if (event.results[i].isFinal) {
-        state.transcript += `${piece} `;
+        state.transcript = mergeTranscriptText(state.transcript, piece);
       } else {
         interimText += piece;
       }
     }
 
-    el.transcript.value = `${state.transcript}${interimText}`.trim();
+    el.transcript.value = mergeTranscriptText(state.transcript, interimText);
     handleTranscriptChanged();
   };
 
   recognition.onerror = () => {
-    el.recStatus.textContent = "状态：语音识别异常，请改为手工记录";
-    el.recStatus.classList.add("warn");
+    setRecordingStatus("状态：语音识别异常，请改为手工记录或下载录音备份", true);
   };
 
   recognition.onend = () => {
+    state.isRecording = false;
     el.startRecBtn.disabled = false;
     el.stopRecBtn.disabled = true;
     if (!el.recStatus.classList.contains("warn")) {
-      el.recStatus.textContent = "状态：已停止";
+      setRecordingStatus("状态：已停止（兼容模式）");
     }
+    updateRecordingUi({ preserveStatus: true });
     handleTranscriptChanged();
   };
 
@@ -1055,23 +1678,54 @@ el.generateBtn.addEventListener("click", async () => {
   }
 });
 
-el.startRecBtn.addEventListener("click", () => {
+el.startRecBtn.addEventListener("click", async () => {
+  const mode = getRecordingMode();
+
+  if (mode === "managed") {
+    await startManagedRecording({ transcribeChunks: true });
+    return;
+  }
+
+  if (mode === "record-only") {
+    await startManagedRecording({ transcribeChunks: false });
+    return;
+  }
+
   if (!state.recognition) {
     state.recognition = setupSpeechRecognition();
   }
 
   if (!state.recognition) {
-    el.recStatus.textContent = "状态：当前浏览器不支持语音识别，请手工记录";
-    el.recStatus.classList.add("warn");
+    setRecordingStatus("状态：当前环境不支持录音或转写，请手工记录", true);
     return;
   }
 
-  state.recognition.start();
+  try {
+    state.recognition.start();
+  } catch (error) {
+    setRecordingStatus(`状态：无法启动兼容模式转写 - ${error.message}`, true);
+  }
 });
 
 el.stopRecBtn.addEventListener("click", () => {
+  if (state.recorder && state.recorder.state !== "inactive") {
+    state.recorder.stop();
+    return;
+  }
   if (!state.recognition) return;
-  state.recognition.stop();
+  try {
+    state.recognition.stop();
+  } catch {
+    setRecordingStatus("状态：停止兼容模式转写失败，请重试", true);
+  }
+});
+
+el.restartRealtimeBtn.addEventListener("click", () => {
+  restartRealtimeStreaming();
+});
+
+el.downloadAudioBtn.addEventListener("click", () => {
+  downloadRecordingBackup();
 });
 
 el.appendBtn.addEventListener("click", () => {
@@ -1253,6 +1907,8 @@ el.exportJsonBtn.addEventListener("click", () => {
   const fileName = `候选人档案批量导出_${buildTimestampForFile()}.json`;
   downloadFile(fileName, jsonText, "application/json;charset=utf-8");
 });
+setRecordingModeStatus("转写模式：检测中", "loading");
+el.startRecBtn.disabled = true;
 checkBackend();
 renderFollowupState();
 resetAssessmentView();
