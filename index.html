@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>影楼人资面试流程 MVP</title>
-    <link rel="stylesheet" href="./styles.css?v=20260315-4" />
+    <link rel="stylesheet" href="./styles.css?v=20260315-5" />
   </head>
   <body>
     <main class="container">
@@ -74,10 +74,6 @@
       <section class="card">
         <h2>3) 面试实时转写</h2>
         <div class="toolbar">
-          <label>
-            候选人姓名
-            <input id="candidateName" type="text" placeholder="例如：张三" />
-          </label>
           <button id="startRecBtn">开始录音</button>
           <button id="stopRecBtn" disabled>停止录音</button>
           <button id="restartRealtimeBtn" type="button" disabled>重连实时转写</button>
@@ -90,10 +86,6 @@
         <p id="recPreview" class="hint rec-preview">识别预览：等待开始</p>
         <p class="hint">优先使用阿里云实时转写；若实时链路中断，录音备份仍会继续保留，可重连或下载备份。</p>
         <textarea id="transcript" rows="8" placeholder="转写内容会显示在这里。若浏览器不支持语音识别，可手工粘贴面试记录。"></textarea>
-        <div class="toolbar">
-          <input id="manualAppend" type="text" placeholder="手工补充一句记录后点追加" />
-          <button id="appendBtn">追加</button>
-        </div>
         <div class="followup-box">
           <div class="followup-top">
             <div class="followup-current">
@@ -171,7 +163,7 @@
         );
       });
     </script>
-    <script src="./app.js?v=20260315-4"></script>
+    <script src="./app.js?v=20260315-5"></script>
   </body>
 </html>
 

@@ -13,6 +13,7 @@ const WS_BASE = (() => {
   }
   return window.location.origin.replace(/^http/i, "ws");
 })();
+const DEFAULT_CANDIDATE_NAME = "候选人";
 const ARCHIVE_KEY = "studio_hr_records";
 const COMMON_SKILLS = [
   "摄影",
@@ -87,7 +88,6 @@ const el = {
   questionEmpty: document.getElementById("questionEmpty"),
   questionTable: document.getElementById("questionTable"),
   questionBody: document.getElementById("questionBody"),
-  candidateName: document.getElementById("candidateName"),
   startRecBtn: document.getElementById("startRecBtn"),
   stopRecBtn: document.getElementById("stopRecBtn"),
   restartRealtimeBtn: document.getElementById("restartRealtimeBtn"),
@@ -96,8 +96,6 @@ const el = {
   recMode: document.getElementById("recMode"),
   recPreview: document.getElementById("recPreview"),
   transcript: document.getElementById("transcript"),
-  manualAppend: document.getElementById("manualAppend"),
-  appendBtn: document.getElementById("appendBtn"),
   currentQuestionPreview: document.getElementById("currentQuestionPreview"),
   suggestFollowupBtn: document.getElementById("suggestFollowupBtn"),
   followupStatus: document.getElementById("followupStatus"),
@@ -1335,7 +1333,7 @@ async function fetchInterviewReportById(interviewId) {
 function buildRecordSnapshot(report = null) {
   if (!state.assessment) return null;
 
-  const candidate = el.candidateName.value.trim() || "未命名候选人";
+  const candidate = report?.candidateName || DEFAULT_CANDIDATE_NAME;
   const dimension = Array.isArray(state.assessment.dimension) ? state.assessment.dimension : [];
 
   return {
@@ -1428,12 +1426,12 @@ function exportArchiveAsCsv(records) {
 }
 
 function buildInterviewContextKey(jobId, candidateName) {
-  const normalizedName = String(candidateName || "").trim() || "候选人";
+  const normalizedName = String(candidateName || "").trim() || DEFAULT_CANDIDATE_NAME;
   return `${jobId || 0}::${normalizedName}`;
 }
 
 async function ensureInterviewSession(candidateName) {
-  const normalizedName = String(candidateName || "").trim() || "候选人";
+  const normalizedName = String(candidateName || "").trim() || DEFAULT_CANDIDATE_NAME;
   const contextKey = buildInterviewContextKey(state.jobId, normalizedName);
   if (state.lastInterviewId && state.interviewContextKey === contextKey) {
     return state.lastInterviewId;
@@ -1467,7 +1465,7 @@ async function requestFollowupSuggestions({ manual = false } = {}) {
   const currentQuestion = getCurrentQuestion();
   const followupState = getFollowupState(questionIndex);
   const transcriptText = el.transcript.value.trim();
-  const candidateName = el.candidateName.value.trim() || "候选人";
+  const candidateName = DEFAULT_CANDIDATE_NAME;
   const resumeText = el.resumeText.value.trim();
   const jdText = el.jdText.value.trim();
 
@@ -1728,24 +1726,8 @@ el.downloadAudioBtn.addEventListener("click", () => {
   downloadRecordingBackup();
 });
 
-el.appendBtn.addEventListener("click", () => {
-  const line = el.manualAppend.value.trim();
-  if (!line) return;
-
-  const nextValue = `${el.transcript.value.trim()} ${line}`.trim();
-  el.transcript.value = nextValue;
-  state.transcript = nextValue;
-  el.manualAppend.value = "";
-  handleTranscriptChanged();
-});
-
 el.transcript.addEventListener("input", () => {
   handleTranscriptChanged();
-});
-
-el.candidateName.addEventListener("input", () => {
-  state.lastInterviewId = null;
-  state.interviewContextKey = "";
 });
 
 el.suggestFollowupBtn.addEventListener("click", () => {
@@ -1794,7 +1776,7 @@ el.evaluateBtn.addEventListener("click", async () => {
     return;
   }
 
-  const candidateName = el.candidateName.value.trim() || "候选人";
+  const candidateName = DEFAULT_CANDIDATE_NAME;
   const resumeText = el.resumeText.value.trim();
 
   if (!hasMeaningfulText(transcriptText, 12)) {
