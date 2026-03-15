@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>影楼人资面试流程 MVP</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=20260315-2" />
   </head>
   <body>
     <main class="container">
@@ -142,7 +142,29 @@
       </section>
     </main>
 
-    <script src="./app.js"></script>
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        var generateBtn = document.getElementById("generateBtn");
+        var generateStatus = document.getElementById("generateStatus");
+        if (!generateBtn || !generateStatus) return;
+
+        generateBtn.addEventListener(
+          "click",
+          function () {
+            var before = generateStatus.textContent;
+            window.setTimeout(function () {
+              if (generateStatus.textContent === before && /待生成/.test(before)) {
+                generateStatus.textContent = "状态：请求已发起，请稍候...";
+                generateStatus.classList.remove("good", "bad");
+                generateStatus.classList.add("loading");
+              }
+            }, 250);
+          },
+          true
+        );
+      });
+    </script>
+    <script src="./app.js?v=20260315-2"></script>
   </body>
 </html>
 

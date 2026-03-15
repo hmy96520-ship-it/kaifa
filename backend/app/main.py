@@ -25,6 +25,20 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def add_static_no_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path or ""
+
+    if request.method in {"GET", "HEAD"} and not path.startswith("/api"):
+        if path == "/" or path.endswith((".html", ".js", ".css")):
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+
+    return response
+
+
 @app.exception_handler(HTTPException)
 async def handle_http_exception(_request: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content={"ok": False, "message": str(exc.detail)})
