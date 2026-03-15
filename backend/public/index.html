@@ -37,25 +37,9 @@
         </div>
 
         <div class="grid">
-          <label>
-            岗位名称
-            <input id="jobTitle" type="text" placeholder="例如：摄影师 / 后期修图师 / 门店顾问" />
-          </label>
-          <label>
-            必备技能（逗号分隔）
-            <input id="mustSkills" type="text" placeholder="例如：人像布光,引导沟通,后期基础" />
-          </label>
-          <label>
-            加分项（逗号分隔）
-            <input id="niceSkills" type="text" placeholder="例如：短视频拍摄,直播经验" />
-          </label>
           <label class="full">
-            核心职责
-            <textarea id="responsibilities" rows="3" placeholder="例如：独立完成客片拍摄，控制出片质量，和化妆师协同推进拍摄节奏"></textarea>
-          </label>
-          <label class="full">
-            岗位画像原文（可粘贴；上传 JD 后自动填充）
-            <textarea id="jdText" rows="6" placeholder="粘贴完整岗位画像（JD）原文，系统会结合结构化字段生成更精准题库。"></textarea>
+            JD画像（唯一必填；可粘贴，上传 JD 后自动填充）
+            <textarea id="jdText" rows="8" placeholder="粘贴完整岗位JD原文。系统会自动提取岗位名称、核心职责、必备技能和加分项。"></textarea>
           </label>
           <label class="full">
             候选人简历文本（上传简历后自动填充）
@@ -105,29 +89,16 @@
               <span class="followup-label">当前题目</span>
               <strong id="currentQuestionPreview">请先在题库中选择“设为当前题”</strong>
             </div>
-            <button id="suggestFollowupBtn" type="button">分析回答并给追问建议</button>
+            <button id="suggestFollowupBtn" type="button">手动生成下一轮追问</button>
             <span id="followupStatus" class="status">状态：待选择题目</span>
           </div>
-          <div id="followupEmpty" class="empty">请先在题库中选择当前题，再开始转写或手工补充记录。系统会在转写静默后自动刷新追问建议。</div>
+          <div id="followupEmpty" class="empty">请先在题库中选择当前题，再开始转写或手工补充记录。每次点击按钮都会新增一轮追问，历史会完整保留。</div>
           <div id="followupPanel" class="hidden">
             <div class="followup-meta">
-              <span id="followupCompleteness" class="status-pill">回答完整度：待分析</span>
-              <span class="status-pill">自动分析：静默 6 秒后刷新</span>
+              <span id="followupRoundCount" class="status-pill">追问轮次：0</span>
+              <span class="status-pill">手动推进：每次点击生成新一轮，旧轮次保留</span>
             </div>
-            <div class="followup-grid">
-              <div class="followup-section">
-                <h3>风险点</h3>
-                <ul id="followupRiskList" class="followup-list"></ul>
-              </div>
-              <div class="followup-section">
-                <h3>缺失信息</h3>
-                <ul id="followupMissingList" class="followup-list"></ul>
-              </div>
-            </div>
-            <div class="followup-section">
-              <h3>建议追问</h3>
-              <ul id="followupQuestionList" class="followup-list"></ul>
-            </div>
+            <div id="followupHistory" class="followup-history"></div>
           </div>
         </div>
       </section>

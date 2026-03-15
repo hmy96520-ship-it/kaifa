@@ -7,8 +7,6 @@ const API_BASE = IS_FILE_MODE
     ? `http://${window.location.hostname}:3001`
     : "";
 const ARCHIVE_KEY = "studio_hr_records";
-const FOLLOWUP_DEBOUNCE_MS = 6000;
-
 const COMMON_SKILLS = [
   "摄影",
   "儿童摄影",
@@ -45,9 +43,7 @@ const state = {
   interviewContextKey: "",
   recognition: null,
   currentQuestionIndex: null,
-  followupAnalysis: null,
-  followupAsked: [],
-  followupTimer: null,
+  followupRounds: [],
   followupRequestSeq: 0,
   lastFollowupKey: "",
 };
@@ -59,10 +55,6 @@ const el = {
   jdUploadStatus: document.getElementById("jdUploadStatus"),
   resumeFile: document.getElementById("resumeFile"),
   resumeUploadStatus: document.getElementById("resumeUploadStatus"),
-  jobTitle: document.getElementById("jobTitle"),
-  mustSkills: document.getElementById("mustSkills"),
-  niceSkills: document.getElementById("niceSkills"),
-  responsibilities: document.getElementById("responsibilities"),
   jdText: document.getElementById("jdText"),
   resumeText: document.getElementById("resumeText"),
   generateBtn: document.getElementById("generateBtn"),
@@ -81,10 +73,8 @@ const el = {
   followupStatus: document.getElementById("followupStatus"),
   followupEmpty: document.getElementById("followupEmpty"),
   followupPanel: document.getElementById("followupPanel"),
-  followupCompleteness: document.getElementById("followupCompleteness"),
-  followupRiskList: document.getElementById("followupRiskList"),
-  followupMissingList: document.getElementById("followupMissingList"),
-  followupQuestionList: document.getElementById("followupQuestionList"),
+  followupRoundCount: document.getElementById("followupRoundCount"),
+  followupHistory: document.getElementById("followupHistory"),
   evaluateBtn: document.getElementById("evaluateBtn"),
   saveBtn: document.getElementById("saveBtn"),
   downloadReportBtn: document.getElementById("downloadReportBtn"),
@@ -175,11 +165,17 @@ function getCurrentQuestion() {
   return state.questions[state.currentQuestionIndex] || null;
 }
 
-function clearScheduledFollowup() {
-  if (state.followupTimer) {
-    window.clearTimeout(state.followupTimer);
-    state.followupTimer = null;
+function getAskedFollowups() {
+  const asked = [];
+  for (const round of state.followupRounds) {
+    for (const item of round.askedFollowups || []) {
+      if (!asked.includes(item)) {
+        asked.push(item);
+      }
+    }
   }
+
+  return asked;
 }
 
 function resetAssessmentView() {
@@ -198,35 +194,46 @@ function updateFollowupStatus(text, warn = false) {
   el.followupStatus.classList.toggle("warn", warn);
 }
 
-function renderPlainList(node, items, emptyText) {
-  node.innerHTML = "";
-
+function createFollowupList(items, emptyText) {
+  const list = document.createElement("ul");
+  list.className = "followup-list";
   const values = Array.isArray(items) && items.length ? items : [emptyText];
   values.forEach((item) => {
     const li = document.createElement("li");
     li.textContent = item;
-    node.appendChild(li);
+    list.appendChild(li);
   });
+
+  return list;
 }
 
-function renderFollowupQuestions(items) {
-  el.followupQuestionList.innerHTML = "";
+function createFollowupQuestionList(round, roundIndex) {
+  const list = document.createElement("ul");
+  list.className = "followup-list";
+  const items = Array.isArray(round.followupQuestions) ? round.followupQuestions : [];
 
-  if (!Array.isArray(items) || !items.length) {
+  if (!items.length) {
     const li = document.createElement("li");
     li.textContent = "当前回答已经比较完整，暂无新增追问。";
-    el.followupQuestionList.appendChild(li);
-    return;
+    list.appendChild(li);
+    return list;
   }
 
   items.forEach((item, index) => {
     const li = document.createElement("li");
     li.className = "followup-question-item";
 
-    const asked = state.followupAsked.includes(item);
+    const asked = round.askedFollowups.includes(item);
+    if (asked) {
+      li.classList.add("is-asked");
+    }
+
     const text = document.createElement("div");
     text.className = "followup-question-text";
     text.textContent = item;
+    if (asked) {
+      text.classList.add("is-asked");
+    }
 
     const actions = document.createElement("div");
     actions.className = "followup-actions";
@@ -235,6 +242,7 @@ function renderFollowupQuestions(items) {
     copyBtn.type = "button";
     copyBtn.className = "ghost-btn";
     copyBtn.dataset.action = "copy-followup";
+    copyBtn.dataset.roundIndex = String(roundIndex);
     copyBtn.dataset.index = String(index);
     copyBtn.textContent = "复制";
 
@@ -242,14 +250,17 @@ function renderFollowupQuestions(items) {
     markBtn.type = "button";
     markBtn.className = "ghost-btn";
     markBtn.dataset.action = "mark-followup";
+    markBtn.dataset.roundIndex = String(roundIndex);
     markBtn.dataset.index = String(index);
     markBtn.textContent = asked ? "已追问" : "标记已问";
     markBtn.disabled = asked;
 
     actions.append(copyBtn, markBtn);
     li.append(text, actions);
-    el.followupQuestionList.appendChild(li);
+    list.appendChild(li);
   });
+
+  return list;
 }
 
 function renderFollowupState() {
@@ -260,39 +271,91 @@ function renderFollowupState() {
     el.currentQuestionPreview.textContent = "请先在题库中选择“设为当前题”";
     el.followupEmpty.classList.remove("hidden");
     el.followupPanel.classList.add("hidden");
-    el.followupCompleteness.textContent = "回答完整度：待分析";
+    el.followupRoundCount.textContent = "追问轮次：0";
+    el.followupHistory.innerHTML = "";
     updateFollowupStatus("状态：待选择题目");
     return;
   }
 
   el.currentQuestionPreview.textContent = `${currentQuestion.type}｜${currentQuestion.question}`;
 
-  if (!state.followupAnalysis) {
+  if (!state.followupRounds.length) {
     el.followupEmpty.classList.remove("hidden");
     el.followupPanel.classList.add("hidden");
-    el.followupEmpty.textContent = "当前题已选。开始转写或手工补充记录后，系统会自动识别风险点和建议追问。";
-    el.followupCompleteness.textContent = "回答完整度：待分析";
-    if (!/分析|刷新|失败|已更新|待填写/.test(el.followupStatus.textContent)) {
-      updateFollowupStatus("状态：待分析");
+    el.followupEmpty.textContent = "当前题已选。候选人回答一轮后，点击“手动生成下一轮追问”。历史轮次会一直保留。";
+    el.followupRoundCount.textContent = "追问轮次：0";
+    el.followupHistory.innerHTML = "";
+    if (!/分析|失败|已生成|已标记|已更新/.test(el.followupStatus.textContent)) {
+      updateFollowupStatus("状态：待手动生成第一轮追问");
     }
     return;
   }
 
   el.followupEmpty.classList.add("hidden");
   el.followupPanel.classList.remove("hidden");
-  el.followupCompleteness.textContent = state.followupAnalysis.answerComplete
-    ? "回答完整度：较完整"
-    : "回答完整度：仍需追问";
+  el.followupRoundCount.textContent = `追问轮次：${state.followupRounds.length}`;
+  el.followupHistory.innerHTML = "";
 
-  renderPlainList(el.followupRiskList, state.followupAnalysis.riskPoints, "暂无明显风险点");
-  renderPlainList(el.followupMissingList, state.followupAnalysis.missingInfo, "暂无明显信息缺口");
-  renderFollowupQuestions(state.followupAnalysis.followupQuestions);
+  state.followupRounds.forEach((round, roundIndex) => {
+    const article = document.createElement("article");
+    article.className = "followup-round";
+
+    const header = document.createElement("div");
+    header.className = "followup-round-header";
+
+    const titleWrap = document.createElement("div");
+    const title = document.createElement("div");
+    title.className = "followup-round-title";
+    title.textContent = `第 ${roundIndex + 1} 轮追问`;
+
+    const time = document.createElement("div");
+    time.className = "followup-round-time";
+    time.textContent = `生成于 ${round.generatedAt}`;
+
+    titleWrap.append(title, time);
+
+    const meta = document.createElement("div");
+    meta.className = "followup-round-meta";
+
+    const completeness = document.createElement("span");
+    completeness.className = "status-pill";
+    completeness.textContent = round.answerComplete ? "回答完整度：较完整" : "回答完整度：仍需追问";
+
+    const askedCount = document.createElement("span");
+    askedCount.className = "status-pill";
+    askedCount.textContent = `已追问：${round.askedFollowups.length}/${round.followupQuestions.length}`;
+
+    meta.append(completeness, askedCount);
+    header.append(titleWrap, meta);
+
+    const grid = document.createElement("div");
+    grid.className = "followup-grid";
+
+    const riskSection = document.createElement("div");
+    riskSection.className = "followup-section";
+    riskSection.innerHTML = "<h3>风险点</h3>";
+    riskSection.appendChild(createFollowupList(round.riskPoints, "暂无明显风险点"));
+
+    const missingSection = document.createElement("div");
+    missingSection.className = "followup-section";
+    missingSection.innerHTML = "<h3>缺失信息</h3>";
+    missingSection.appendChild(createFollowupList(round.missingInfo, "暂无明显信息缺口"));
+
+    grid.append(riskSection, missingSection);
+
+    const questionSection = document.createElement("div");
+    questionSection.className = "followup-section";
+    questionSection.innerHTML = "<h3>建议追问</h3>";
+    questionSection.appendChild(createFollowupQuestionList(round, roundIndex));
+
+    article.append(header, grid, questionSection);
+    el.followupHistory.appendChild(article);
+  });
 }
 
 function resetFollowupState({ keepQuestion = false } = {}) {
-  clearScheduledFollowup();
-  state.followupAnalysis = null;
-  state.followupAsked = [];
+  state.followupRounds = [];
+  state.followupRequestSeq = 0;
   state.lastFollowupKey = "";
   if (!keepQuestion) {
     state.currentQuestionIndex = null;
@@ -304,52 +367,12 @@ function collectJd() {
   const jdText = el.jdText.value.trim();
   const resumeText = el.resumeText.value.trim();
 
-  let jobTitle = el.jobTitle.value.trim();
-  let responsibilities = el.responsibilities.value.trim();
-
-  if (!jobTitle && jdText) {
-    jobTitle = inferTitleFromText(jdText) || "未命名岗位";
-    el.jobTitle.value = jobTitle;
-  }
-
-  if (!responsibilities && jdText) {
-    responsibilities = jdText.slice(0, 1200);
-    el.responsibilities.value = responsibilities;
-  }
-
-  let mustSkills = splitByComma(el.mustSkills.value);
-  let niceSkills = splitByComma(el.niceSkills.value);
-
-  if (!mustSkills.length && jdText) {
-    mustSkills = inferSkillsFromText(jdText, 6);
-    el.mustSkills.value = mustSkills.join(",");
-  }
-
-  if (!niceSkills.length && jdText) {
-    const inferred = inferSkillsFromText(jdText, 12);
-    niceSkills = inferred.filter((item) => !mustSkills.includes(item)).slice(0, 6);
-    el.niceSkills.value = niceSkills.join(",");
-  }
-
-  if (!jobTitle) {
-    alert("请先填写岗位名称，或上传包含岗位信息的 JD 文件");
+  if (!hasMeaningfulText(jdText, 12)) {
+    alert("请先填写或上传完整 JD 画像原文（内容需足够具体）");
     return null;
   }
 
-  if (isPlaceholderLike(jobTitle) || String(jobTitle).trim().length < 2) {
-    alert("岗位名称过短或像占位值，请填写真实岗位名称");
-    return null;
-  }
-
-  if (!responsibilities && !jdText) {
-    alert("请先填写核心职责，或上传/粘贴 JD 原文");
-    return null;
-  }
-
-  if (!hasMeaningfulText(responsibilities, 8) && !hasMeaningfulText(jdText, 12)) {
-    alert("核心职责或岗位画像原文内容过短/像占位值，请补充真实 JD 信息");
-    return null;
-  }
+  const jobTitle = inferTitleFromText(jdText) || "未命名岗位";
 
   if (resumeText && !hasMeaningfulText(resumeText, 12)) {
     alert("候选人简历文本内容过短或像占位值，请上传/粘贴真实简历内容");
@@ -358,9 +381,6 @@ function collectJd() {
 
   return {
     jobTitle,
-    mustSkills,
-    niceSkills,
-    responsibilities,
     jdText,
     resumeText,
   };
@@ -487,13 +507,12 @@ function setActiveQuestion(index) {
   }
 
   state.currentQuestionIndex = index;
-  state.followupAnalysis = null;
-  state.followupAsked = [];
+  state.followupRounds = [];
+  state.followupRequestSeq = 0;
   state.lastFollowupKey = "";
-  updateFollowupStatus(`状态：已切换到第 ${index + 1} 题`);
+  updateFollowupStatus(`状态：已切换到第 ${index + 1} 题，请手动生成第一轮追问`);
   renderQuestions(state.questions);
   renderFollowupState();
-  scheduleFollowupAnalysis({ manual: false });
 }
 
 function setupSpeechRecognition() {
@@ -525,7 +544,7 @@ function setupSpeechRecognition() {
     }
 
     el.transcript.value = `${state.transcript}${interimText}`.trim();
-    scheduleFollowupAnalysis({ manual: false });
+    handleTranscriptChanged();
   };
 
   recognition.onerror = () => {
@@ -539,7 +558,7 @@ function setupSpeechRecognition() {
     if (!el.recStatus.classList.contains("warn")) {
       el.recStatus.textContent = "状态：已停止";
     }
-    scheduleFollowupAnalysis({ manual: false });
+    handleTranscriptChanged();
   };
 
   return recognition;
@@ -809,16 +828,17 @@ async function requestFollowupSuggestions({ manual = false } = {}) {
     return;
   }
 
-  const askedFollowups = [...state.followupAsked];
+  const askedFollowups = getAskedFollowups();
   const requestKey = buildFollowupRequestKey(currentQuestion, transcriptText, askedFollowups);
-  if (!manual && requestKey === state.lastFollowupKey) {
+  if (requestKey === state.lastFollowupKey) {
+    updateFollowupStatus("状态：回答和已问追问没有变化，暂不生成新一轮", true);
     return;
   }
 
   const seq = state.followupRequestSeq + 1;
   state.followupRequestSeq = seq;
-  setButtonBusy(el.suggestFollowupBtn, "分析中...", "分析回答并给追问建议", true);
-  updateFollowupStatus(manual ? "状态：分析当前回答中..." : "状态：静默窗口已到，正在刷新追问建议...");
+  setButtonBusy(el.suggestFollowupBtn, "生成中...", "手动生成下一轮追问", true);
+  updateFollowupStatus("状态：正在生成下一轮追问...");
 
   try {
     const interviewId = await ensureInterviewSession(candidateName);
@@ -837,45 +857,48 @@ async function requestFollowupSuggestions({ manual = false } = {}) {
 
     if (seq !== state.followupRequestSeq) return;
 
-    state.followupAnalysis = res.analysis || null;
+    const analysis = res.analysis || {};
+    state.followupRounds.push({
+      answerComplete: Boolean(analysis.answerComplete),
+      riskPoints: Array.isArray(analysis.riskPoints) ? analysis.riskPoints : [],
+      missingInfo: Array.isArray(analysis.missingInfo) ? analysis.missingInfo : [],
+      followupQuestions: Array.isArray(analysis.followupQuestions) ? analysis.followupQuestions : [],
+      askedFollowups: [],
+      generatedAt: new Date().toLocaleTimeString(),
+    });
     state.lastFollowupKey = requestKey;
     renderFollowupState();
-    updateFollowupStatus(`状态：已更新追问建议（${new Date().toLocaleTimeString()}）`);
+    updateFollowupStatus(`状态：已生成第 ${state.followupRounds.length} 轮追问（${new Date().toLocaleTimeString()}）`);
   } catch (error) {
     if (seq !== state.followupRequestSeq) return;
-    state.followupAnalysis = null;
     renderFollowupState();
     updateFollowupStatus(`状态：追问分析失败 - ${error.message}`, true);
     if (manual) alert(`追问分析失败：${error.message}`);
   } finally {
     if (seq === state.followupRequestSeq) {
-      setButtonBusy(el.suggestFollowupBtn, "分析中...", "分析回答并给追问建议", false);
+      setButtonBusy(el.suggestFollowupBtn, "生成中...", "手动生成下一轮追问", false);
     }
   }
 }
 
-function scheduleFollowupAnalysis({ manual = false } = {}) {
-  clearScheduledFollowup();
-
-  if (manual) {
-    requestFollowupSuggestions({ manual: true });
-    return;
-  }
+function handleTranscriptChanged() {
+  state.transcript = el.transcript.value.trim();
 
   if (!getCurrentQuestion() || !state.jobId) {
-    renderFollowupState();
     return;
   }
 
-  if (!hasMeaningfulText(el.transcript.value.trim(), 12)) {
-    renderFollowupState();
+  if (!hasMeaningfulText(state.transcript, 12)) {
+    updateFollowupStatus("状态：继续记录回答，补充完整后再手动生成追问");
     return;
   }
 
-  updateFollowupStatus("状态：等待回答稳定后自动分析...");
-  state.followupTimer = window.setTimeout(() => {
-    requestFollowupSuggestions({ manual: false });
-  }, FOLLOWUP_DEBOUNCE_MS);
+  if (state.followupRounds.length) {
+    updateFollowupStatus("状态：回答已更新，可手动生成下一轮追问");
+    return;
+  }
+
+  updateFollowupStatus("状态：回答已记录，可手动生成第一轮追问");
 }
 
 async function handleUpload(file, kind) {
@@ -898,28 +921,6 @@ async function handleUpload(file, kind) {
 
     if (kind === "jd") {
       el.jdText.value = text;
-
-      if (!el.jobTitle.value.trim()) {
-        el.jobTitle.value = inferTitleFromText(text) || el.jobTitle.value;
-      }
-
-      if (!el.responsibilities.value.trim()) {
-        el.responsibilities.value = text.slice(0, 1200);
-      }
-
-      const must = splitByComma(el.mustSkills.value);
-      if (!must.length) {
-        el.mustSkills.value = uniqueKeepOrder(inferSkillsFromText(text, 6)).join(",");
-      }
-
-      const nice = splitByComma(el.niceSkills.value);
-      if (!nice.length) {
-        const inferred = inferSkillsFromText(text, 12);
-        const mustSet = new Set(splitByComma(el.mustSkills.value));
-        const niceAuto = inferred.filter((item) => !mustSet.has(item)).slice(0, 6);
-        el.niceSkills.value = uniqueKeepOrder(niceAuto).join(",");
-      }
-
       setPillStatus(statusNode, `JD已解析: ${data.fileName}`, true, false);
       return;
     }
@@ -974,10 +975,6 @@ el.generateBtn.addEventListener("click", async () => {
     const jobRes = await apiFetch("/api/jobs", {
       method: "POST",
       body: {
-        title: jd.jobTitle,
-        mustSkills: jd.mustSkills,
-        niceSkills: jd.niceSkills,
-        responsibilities: jd.responsibilities,
         jdText: jd.jdText,
       },
     });
@@ -1042,12 +1039,11 @@ el.appendBtn.addEventListener("click", () => {
   el.transcript.value = nextValue;
   state.transcript = nextValue;
   el.manualAppend.value = "";
-  scheduleFollowupAnalysis({ manual: false });
+  handleTranscriptChanged();
 });
 
 el.transcript.addEventListener("input", () => {
-  state.transcript = el.transcript.value.trim();
-  scheduleFollowupAnalysis({ manual: false });
+  handleTranscriptChanged();
 });
 
 el.candidateName.addEventListener("input", () => {
@@ -1056,15 +1052,17 @@ el.candidateName.addEventListener("input", () => {
 });
 
 el.suggestFollowupBtn.addEventListener("click", () => {
-  scheduleFollowupAnalysis({ manual: true });
+  requestFollowupSuggestions({ manual: true });
 });
 
-el.followupQuestionList.addEventListener("click", async (event) => {
+el.followupHistory.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
-  if (!button || !state.followupAnalysis) return;
+  if (!button) return;
 
+  const roundIndex = Number(button.dataset.roundIndex);
   const index = Number(button.dataset.index);
-  const suggestion = state.followupAnalysis.followupQuestions?.[index];
+  const round = state.followupRounds[roundIndex];
+  const suggestion = round?.followupQuestions?.[index];
   if (!suggestion) return;
 
   if (button.dataset.action === "copy-followup") {
@@ -1078,12 +1076,10 @@ el.followupQuestionList.addEventListener("click", async (event) => {
   }
 
   if (button.dataset.action === "mark-followup") {
-    if (!state.followupAsked.includes(suggestion)) {
-      state.followupAsked.push(suggestion);
-      state.lastFollowupKey = "";
+    if (!round.askedFollowups.includes(suggestion)) {
+      round.askedFollowups.push(suggestion);
       renderFollowupState();
-      updateFollowupStatus(`状态：已标记第 ${index + 1} 条追问为“已问”`);
-      scheduleFollowupAnalysis({ manual: false });
+      updateFollowupStatus(`状态：已在第 ${roundIndex + 1} 轮标记第 ${index + 1} 条追问为“已问”`);
     }
   }
 });
