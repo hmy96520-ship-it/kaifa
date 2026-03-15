@@ -58,6 +58,7 @@ const el = {
   jdText: document.getElementById("jdText"),
   resumeText: document.getElementById("resumeText"),
   generateBtn: document.getElementById("generateBtn"),
+  generateStatus: document.getElementById("generateStatus"),
   questionEmpty: document.getElementById("questionEmpty"),
   questionTable: document.getElementById("questionTable"),
   questionBody: document.getElementById("questionBody"),
@@ -394,9 +395,16 @@ function setBackendStatus(ok, text) {
 
 function setPillStatus(node, text, good = false, bad = false) {
   node.textContent = text;
-  node.classList.remove("good", "bad");
+  node.classList.remove("good", "bad", "loading");
   if (good) node.classList.add("good");
   if (bad) node.classList.add("bad");
+}
+
+function setGenerateStatus(text, tone = "idle") {
+  setPillStatus(el.generateStatus, text, tone === "good", tone === "bad");
+  if (tone === "loading") {
+    el.generateStatus.classList.add("loading");
+  }
 }
 
 async function apiFetch(path, options = {}) {
@@ -963,13 +971,16 @@ el.generateBtn.addEventListener("click", async () => {
   const jd = collectJd();
   if (!jd) return;
 
+  setGenerateStatus("状态：检测后端中...", "loading");
   const ok = await checkBackend();
   if (!ok) {
+    setGenerateStatus("状态：后端未连接", "bad");
     alert("后端未连接，请先启动 backend: npm run dev");
     return;
   }
 
   setButtonBusy(el.generateBtn, "生成中...", "生成结构化面试题库", true);
+  setGenerateStatus("状态：正在创建岗位...", "loading");
 
   try {
     const jobRes = await apiFetch("/api/jobs", {
@@ -984,6 +995,7 @@ el.generateBtn.addEventListener("click", async () => {
     state.lastInterviewId = null;
     state.interviewContextKey = "";
     resetAssessmentView();
+    setGenerateStatus("状态：AI 正在生成题库，通常需要 20-90 秒...", "loading");
 
     const questionRes = await apiFetch(`/api/jobs/${state.jobId}/questions/generate`, {
       method: "POST",
@@ -1004,8 +1016,10 @@ el.generateBtn.addEventListener("click", async () => {
     resetFollowupState({ keepQuestion: state.currentQuestionIndex !== null });
     renderQuestions(state.questions);
     renderFollowupState();
+    setGenerateStatus(`状态：生成完成，共 ${state.questions.length} 题`, "good");
     alert(`题库生成成功，共 ${state.questions.length} 题（岗位ID: ${state.jobId}）`);
   } catch (error) {
+    setGenerateStatus(`状态：生成失败 - ${error.message}`, "bad");
     alert(`生成失败：${error.message}`);
   } finally {
     setButtonBusy(el.generateBtn, "生成中...", "生成结构化面试题库", false);
@@ -1213,6 +1227,7 @@ checkBackend();
 renderFollowupState();
 resetAssessmentView();
 renderArchive();
+setGenerateStatus("状态：待生成");
 
 
 

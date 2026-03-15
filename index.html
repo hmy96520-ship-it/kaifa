@@ -46,7 +46,11 @@
             <textarea id="resumeText" rows="6" placeholder="粘贴候选人简历原文，系统会根据简历做针对性出题和评估。"></textarea>
           </label>
         </div>
-        <button id="generateBtn">生成结构化面试题库</button>
+        <div class="primary-action">
+          <button id="generateBtn">生成结构化面试题库</button>
+          <span id="generateStatus" class="status-pill">状态：待生成</span>
+        </div>
+        <p class="hint">公网 AI 生成通常需要 20-90 秒，点击后状态会实时更新。</p>
       </section>
 
       <section class="card">

@@ -183,6 +183,28 @@ button:disabled {
   flex: 0 0 140px;
 }
 
+.primary-action {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.primary-action button {
+  flex: 1 1 auto;
+  margin-top: 0;
+}
+
+.primary-action .status-pill {
+  min-width: 180px;
+  text-align: center;
+}
+
+.status-pill.loading {
+  color: #0f766e;
+  background: #d7ece9;
+}
+
 .status {
   color: var(--muted);
   font-size: 14px;
@@ -430,6 +452,15 @@ th {
 
   .toolbar button {
     flex: 1 1 40%;
+  }
+
+  .primary-action {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .primary-action .status-pill {
+    min-width: 0;
   }
 
   .followup-top {
