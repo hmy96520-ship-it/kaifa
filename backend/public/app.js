@@ -43,9 +43,7 @@ const state = {
   interviewContextKey: "",
   recognition: null,
   currentQuestionIndex: null,
-  followupRounds: [],
-  followupRequestSeq: 0,
-  lastFollowupKey: "",
+  followupByQuestion: {},
 };
 
 const el = {
@@ -166,9 +164,32 @@ function getCurrentQuestion() {
   return state.questions[state.currentQuestionIndex] || null;
 }
 
+function createEmptyFollowupState() {
+  return {
+    rounds: [],
+    requestSeq: 0,
+    lastKey: "",
+  };
+}
+
+function getFollowupState(questionIndex = state.currentQuestionIndex) {
+  if (!Number.isInteger(questionIndex) || questionIndex < 0) {
+    return null;
+  }
+
+  if (!state.followupByQuestion[questionIndex]) {
+    state.followupByQuestion[questionIndex] = createEmptyFollowupState();
+  }
+
+  return state.followupByQuestion[questionIndex];
+}
+
 function getAskedFollowups() {
+  const followupState = getFollowupState();
+  if (!followupState) return [];
+
   const asked = [];
-  for (const round of state.followupRounds) {
+  for (const round of followupState.rounds) {
     for (const item of round.askedFollowups || []) {
       if (!asked.includes(item)) {
         asked.push(item);
@@ -266,6 +287,7 @@ function createFollowupQuestionList(round, roundIndex) {
 
 function renderFollowupState() {
   const currentQuestion = getCurrentQuestion();
+  const followupState = getFollowupState();
   el.suggestFollowupBtn.disabled = !currentQuestion || !state.jobId;
 
   if (!currentQuestion) {
@@ -280,7 +302,7 @@ function renderFollowupState() {
 
   el.currentQuestionPreview.textContent = `${currentQuestion.type}｜${currentQuestion.question}`;
 
-  if (!state.followupRounds.length) {
+  if (!followupState || !followupState.rounds.length) {
     el.followupEmpty.classList.remove("hidden");
     el.followupPanel.classList.add("hidden");
     el.followupEmpty.textContent = "当前题已选。候选人回答一轮后，点击“手动生成下一轮追问”。历史轮次会一直保留。";
@@ -294,10 +316,10 @@ function renderFollowupState() {
 
   el.followupEmpty.classList.add("hidden");
   el.followupPanel.classList.remove("hidden");
-  el.followupRoundCount.textContent = `追问轮次：${state.followupRounds.length}`;
+  el.followupRoundCount.textContent = `追问轮次：${followupState.rounds.length}`;
   el.followupHistory.innerHTML = "";
 
-  state.followupRounds.forEach((round, roundIndex) => {
+  followupState.rounds.forEach((round, roundIndex) => {
     const article = document.createElement("article");
     article.className = "followup-round";
 
@@ -355,9 +377,7 @@ function renderFollowupState() {
 }
 
 function resetFollowupState({ keepQuestion = false } = {}) {
-  state.followupRounds = [];
-  state.followupRequestSeq = 0;
-  state.lastFollowupKey = "";
+  state.followupByQuestion = {};
   if (!keepQuestion) {
     state.currentQuestionIndex = null;
   }
@@ -515,10 +535,12 @@ function setActiveQuestion(index) {
   }
 
   state.currentQuestionIndex = index;
-  state.followupRounds = [];
-  state.followupRequestSeq = 0;
-  state.lastFollowupKey = "";
-  updateFollowupStatus(`状态：已切换到第 ${index + 1} 题，请手动生成第一轮追问`);
+  const followupState = getFollowupState(index);
+  if (followupState?.rounds.length) {
+    updateFollowupStatus(`状态：已切换到第 ${index + 1} 题，已恢复 ${followupState.rounds.length} 轮追问记录`);
+  } else {
+    updateFollowupStatus(`状态：已切换到第 ${index + 1} 题，请手动生成第一轮追问`);
+  }
   renderQuestions(state.questions);
   renderFollowupState();
 }
@@ -818,7 +840,9 @@ function buildFollowupRequestKey(question, transcriptText, askedFollowups) {
 }
 
 async function requestFollowupSuggestions({ manual = false } = {}) {
+  const questionIndex = state.currentQuestionIndex;
   const currentQuestion = getCurrentQuestion();
+  const followupState = getFollowupState(questionIndex);
   const transcriptText = el.transcript.value.trim();
   const candidateName = el.candidateName.value.trim() || "候选人";
   const resumeText = el.resumeText.value.trim();
@@ -838,13 +862,13 @@ async function requestFollowupSuggestions({ manual = false } = {}) {
 
   const askedFollowups = getAskedFollowups();
   const requestKey = buildFollowupRequestKey(currentQuestion, transcriptText, askedFollowups);
-  if (requestKey === state.lastFollowupKey) {
+  if (requestKey === followupState?.lastKey) {
     updateFollowupStatus("状态：回答和已问追问没有变化，暂不生成新一轮", true);
     return;
   }
 
-  const seq = state.followupRequestSeq + 1;
-  state.followupRequestSeq = seq;
+  const seq = (followupState?.requestSeq || 0) + 1;
+  followupState.requestSeq = seq;
   setButtonBusy(el.suggestFollowupBtn, "生成中...", "手动生成下一轮追问", true);
   updateFollowupStatus("状态：正在生成下一轮追问...");
 
@@ -863,10 +887,10 @@ async function requestFollowupSuggestions({ manual = false } = {}) {
       },
     });
 
-    if (seq !== state.followupRequestSeq) return;
+    if (seq !== followupState.requestSeq) return;
 
     const analysis = res.analysis || {};
-    state.followupRounds.push({
+    followupState.rounds.push({
       answerComplete: Boolean(analysis.answerComplete),
       riskPoints: Array.isArray(analysis.riskPoints) ? analysis.riskPoints : [],
       missingInfo: Array.isArray(analysis.missingInfo) ? analysis.missingInfo : [],
@@ -874,22 +898,27 @@ async function requestFollowupSuggestions({ manual = false } = {}) {
       askedFollowups: [],
       generatedAt: new Date().toLocaleTimeString(),
     });
-    state.lastFollowupKey = requestKey;
-    renderFollowupState();
-    updateFollowupStatus(`状态：已生成第 ${state.followupRounds.length} 轮追问（${new Date().toLocaleTimeString()}）`);
+    followupState.lastKey = requestKey;
+    if (state.currentQuestionIndex === questionIndex) {
+      renderFollowupState();
+      updateFollowupStatus(`状态：已生成第 ${followupState.rounds.length} 轮追问（${new Date().toLocaleTimeString()}）`);
+    }
   } catch (error) {
-    if (seq !== state.followupRequestSeq) return;
-    renderFollowupState();
-    updateFollowupStatus(`状态：追问分析失败 - ${error.message}`, true);
+    if (seq !== followupState.requestSeq) return;
+    if (state.currentQuestionIndex === questionIndex) {
+      renderFollowupState();
+      updateFollowupStatus(`状态：追问分析失败 - ${error.message}`, true);
+    }
     if (manual) alert(`追问分析失败：${error.message}`);
   } finally {
-    if (seq === state.followupRequestSeq) {
+    if (seq === followupState.requestSeq) {
       setButtonBusy(el.suggestFollowupBtn, "生成中...", "手动生成下一轮追问", false);
     }
   }
 }
 
 function handleTranscriptChanged() {
+  const followupState = getFollowupState();
   state.transcript = el.transcript.value.trim();
 
   if (!getCurrentQuestion() || !state.jobId) {
@@ -901,7 +930,7 @@ function handleTranscriptChanged() {
     return;
   }
 
-  if (state.followupRounds.length) {
+  if (followupState?.rounds.length) {
     updateFollowupStatus("状态：回答已更新，可手动生成下一轮追问");
     return;
   }
@@ -1073,9 +1102,10 @@ el.followupHistory.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
 
+  const followupState = getFollowupState();
   const roundIndex = Number(button.dataset.roundIndex);
   const index = Number(button.dataset.index);
-  const round = state.followupRounds[roundIndex];
+  const round = followupState?.rounds[roundIndex];
   const suggestion = round?.followupQuestions?.[index];
   if (!suggestion) return;
 
