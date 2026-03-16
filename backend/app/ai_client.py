@@ -43,6 +43,60 @@ SENSITIVE_PATTERNS = [
     re.compile(r"联系方式\s*[:：]?\s*[^\n]*", re.I),
 ]
 
+VALID_QUESTION_CATEGORIES = {"基础题", "专业题", "行为题", "情景题", "综合题"}
+GENERIC_RESUME_HEADINGS = {
+    "工作经历",
+    "工作经验",
+    "项目经历",
+    "项目经验",
+    "实习经历",
+    "实践经历",
+    "教育背景",
+    "教育经历",
+    "校园经历",
+    "自我评价",
+    "个人评价",
+    "个人优势",
+    "专业技能",
+    "技能证书",
+    "资格证书",
+    "获奖经历",
+    "荣誉奖项",
+    "求职意向",
+    "个人信息",
+    "基本信息",
+}
+GENERIC_ANCHOR_TOKENS = {
+    "负责",
+    "参与",
+    "协助",
+    "支持",
+    "执行",
+    "工作",
+    "经历",
+    "经验",
+    "项目",
+    "岗位",
+    "简历",
+    "候选人",
+    "能力",
+    "技能",
+    "相关",
+    "内容",
+    "具体",
+    "工作内容",
+    "项目经历",
+    "工作经历",
+    "项目经验",
+    "自我评价",
+    "教育背景",
+}
+DATE_RANGE_PATTERN = re.compile(r"^\d{4}(?:[./-]\d{1,2})?(?:\s*[~-]\s*\d{4}(?:[./-]\d{1,2})?)?$")
+RESUME_ACTION_PATTERN = re.compile(
+    r"(项目|岗位|实习|工作|负责|参与|协助|支持|对接|沟通|协调|管理|服务|客户|招聘|拍摄|销售|运营|活动|数据|Excel|表格|儿童|幼师|教培|家长|培训|引导)",
+    re.I,
+)
+
 
 def clamp(value: int | float, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, int(round(float(value or 0)))))
@@ -93,6 +147,237 @@ def extract_evidence_segments(text: str, *, limit: int = 10, min_length: int = 8
     return result
 
 
+def normalize_lookup_text(text: str) -> str:
+    return re.sub(r"[\s\-—_./,，。！？；;：:、()（）【】\\|]+", "", str(text or "").lower())
+
+
+def normalize_question_category(value: str) -> str:
+    category = str(value or "").strip()
+    if category in VALID_QUESTION_CATEGORIES:
+        return category
+    if "行为" in category:
+        return "行为题"
+    if "情景" in category or "场景" in category:
+        return "情景题"
+    if "综合" in category:
+        return "综合题"
+    if any(token in category for token in ("基础", "核实", "补证据", "真实性", "追问")):
+        return "基础题"
+    return "专业题"
+
+
+def is_generic_resume_heading(text: str) -> bool:
+    compact = normalize_lookup_text(text)
+    return compact in {normalize_lookup_text(item) for item in GENERIC_RESUME_HEADINGS}
+
+
+def score_resume_anchor_candidate(text: str) -> int:
+    value = str(text or "").strip()
+    if not value:
+        return -99
+
+    score = 0
+    if len(value) >= 10:
+        score += 1
+    if 12 <= len(value) <= 70:
+        score += 2
+    if DATE_RANGE_PATTERN.search(value):
+        score -= 1
+    if re.search(r"\d{4}[./-]\d{1,2}", value):
+        score += 1
+    if RESUME_ACTION_PATTERN.search(value):
+        score += 3
+    if re.search(r"(SOP|ROI|GMV|Excel|PPT|SQL|PS|拍摄|引导|招聘|面试|客户|销售|培训|活动)", value, re.I):
+        score += 2
+    if is_generic_resume_heading(value):
+        score -= 10
+    return score
+
+
+def extract_resume_anchors(text: str, *, limit: int = 8) -> list[str]:
+    cleaned = sanitize_resume_text(text)
+    if not cleaned:
+        return []
+
+    lines = [line.strip(" -•\t\r\n") for line in cleaned.splitlines() if line.strip()]
+    candidates: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+
+    for index, line in enumerate(lines):
+        candidate = line
+        if DATE_RANGE_PATTERN.search(line) and index + 1 < len(lines):
+            next_line = lines[index + 1]
+            if next_line and not is_generic_resume_heading(next_line):
+                candidate = f"{line} {next_line}"
+        normalized = normalize_lookup_text(candidate)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        candidates.append((score_resume_anchor_candidate(candidate), index, candidate[:120]))
+
+    for index, chunk in enumerate(extract_evidence_segments(cleaned, limit=24, min_length=6)):
+        normalized = normalize_lookup_text(chunk)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        candidates.append((score_resume_anchor_candidate(chunk), len(lines) + index, chunk[:120]))
+
+    anchors: list[str] = []
+    for score, _index, value in sorted(candidates, key=lambda item: (-item[0], item[1])):
+        if score < 1:
+            continue
+        if is_generic_resume_heading(value):
+            continue
+        anchors.append(value)
+        if len(anchors) >= limit:
+            break
+
+    return anchors
+
+
+def collect_resume_anchor_tokens(anchors: list[str], jd_text: str) -> list[str]:
+    jd_lookup = normalize_lookup_text(jd_text)
+    primary: list[str] = []
+    secondary: list[str] = []
+    seen: set[str] = set()
+
+    for anchor in anchors:
+        anchor_norm = normalize_lookup_text(anchor)
+        if anchor_norm and anchor_norm not in seen and anchor_norm not in jd_lookup and len(anchor_norm) >= 4:
+            primary.append(anchor_norm)
+            seen.add(anchor_norm)
+
+        pieces = re.split(r"[，,。；;：:、/\\|()\[\]（）\s]+", anchor)
+        for piece in pieces:
+            token = str(piece or "").strip()
+            token_norm = normalize_lookup_text(token)
+            if len(token_norm) < 2 or token_norm in seen:
+                continue
+            if token_norm in {normalize_lookup_text(item) for item in GENERIC_ANCHOR_TOKENS}:
+                continue
+            if DATE_RANGE_PATTERN.search(token):
+                continue
+            if token_norm not in jd_lookup:
+                primary.append(token_norm)
+            else:
+                secondary.append(token_norm)
+            seen.add(token_norm)
+
+    tokens = primary or secondary
+    return sorted(tokens, key=len, reverse=True)
+
+
+def collect_jd_gap_clues(jd: dict[str, Any], jd_evidence: list[str], resume_text: str, *, limit: int = 6) -> list[str]:
+    resume_lookup = normalize_lookup_text(resume_text)
+    candidates = [
+        str(jd.get("title") or "").strip(),
+        *(str(item).strip() for item in (jd.get("mustSkills") or [])),
+        *(str(item).strip() for item in (jd.get("niceSkills") or [])),
+        *jd_evidence,
+    ]
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for item in candidates:
+        value = str(item or "").strip()
+        norm = normalize_lookup_text(value)
+        if len(norm) < 2 or norm in seen:
+            continue
+        seen.add(norm)
+        if norm in resume_lookup:
+            continue
+        result.append(value[:60])
+        if len(result) >= limit:
+            break
+
+    return result
+
+
+def question_references_resume_anchor(question: dict[str, Any], anchor_tokens: list[str]) -> bool:
+    question_text = normalize_lookup_text(question.get("questionText") or "")
+    if not question_text or not anchor_tokens:
+        return False
+    return any(token and token in question_text for token in anchor_tokens)
+
+
+def count_resume_grounded_questions(questions: list[dict[str, Any]], anchor_tokens: list[str]) -> int:
+    return sum(1 for item in questions if question_references_resume_anchor(item, anchor_tokens))
+
+
+def build_question_user_prompt(
+    *,
+    jd: dict[str, Any],
+    cleaned_jd_text: str,
+    cleaned_resume: str,
+    jd_evidence: list[str],
+    resume_evidence: list[str],
+    resume_anchors: list[str],
+    jd_gap_clues: list[str],
+    required_resume_questions: int,
+    strict_resume_grounding: bool,
+) -> str:
+    requirements = [
+        "每道题都必须能在上面的JD证据片段、简历证据片段或结构化字段中找到依据。",
+        "不得使用输入中没有出现的岗位类别、业务制度、旺淡季、薪酬、渠道、组织背景。",
+        "如果简历证据不足，不要脑补经历；改为围绕JD要求做真实性核验、补证据或迁移能力追问。",
+        "优先使用输入中的原词或近义复述，不要泛化成通用HR/管理题。",
+    ]
+
+    if resume_anchors:
+        requirements.append(
+            f"优先直接引用这些简历锚点：{json.dumps(resume_anchors[:6], ensure_ascii=False)}。"
+        )
+        if required_resume_questions > 0:
+            requirements.append(
+                f"至少 {required_resume_questions} 道题的 questionText 必须直接点名一个简历锚点或其中的关键动作，不能只在 focus/rubric 里提简历。"
+            )
+
+    if jd_gap_clues:
+        requirements.append(
+            f"这些JD要求在简历中未直接出现：{json.dumps(jd_gap_clues[:6], ensure_ascii=False)}。"
+        )
+        requirements.append(
+            "针对上述缺口，只能使用“迁移能力/补证据/真实性核验”措辞，禁止默认候选人已经做过该岗位或该职责。"
+        )
+        requirements.append(
+            "例如，若简历未出现“幼师/儿童引导”等词，就不能问“请描述你在幼师岗位上的具体工作内容”，必须改问最接近经历如何迁移。"
+        )
+
+    if strict_resume_grounding:
+        requirements.append("这是重生成：上一版题目对简历锚点引用不足，请显著提高题干中的简历引用密度。")
+        requirements.append("如果简历中已经有明确项目名、岗位名、时间段或关键动作，题干必须优先点名这些事实再追问。")
+
+    enumerated_requirements = [f"{index}. {item}" for index, item in enumerate(requirements, start=1)]
+    return "\n".join(
+        [
+            "请基于以下输入生成结构化面试题：",
+            "",
+            f"岗位名称: {jd.get('title', '')}",
+            f"岗位必备技能: {json.dumps(jd.get('mustSkills', []), ensure_ascii=False, indent=2)}",
+            f"岗位加分技能: {json.dumps(jd.get('niceSkills', []), ensure_ascii=False, indent=2)}",
+            f"岗位职责: {jd.get('responsibilities', '')}",
+            "",
+            "JD关键证据片段（只能基于这些片段和结构化字段出题）:",
+            json.dumps(jd_evidence or ["(未提取到明确JD证据片段)"], ensure_ascii=False, indent=2),
+            "",
+            "原始JD全文:",
+            cleaned_jd_text or "(未提供原始JD全文)",
+            "",
+            "简历关键证据片段（只能基于这些片段追问候选人经历或真实性）:",
+            json.dumps(resume_evidence or ["(未提取到明确简历证据片段)"], ensure_ascii=False, indent=2),
+            "",
+            "简历可直接引用锚点（优先用于题干点名）:",
+            json.dumps(resume_anchors or ["(未提取到可直接引用的简历锚点)"], ensure_ascii=False, indent=2),
+            "",
+            "候选人简历文本:",
+            cleaned_resume or "(未提供简历文本)",
+            "",
+            "硬性生成要求:",
+            *enumerated_requirements,
+        ]
+    )
+
+
 def parse_json_from_model_text(raw_text: str) -> Any:
     text = str(raw_text or "").strip()
     if not text:
@@ -118,7 +403,7 @@ def unique_questions(items: list[dict[str, Any]]) -> list[dict[str, str]]:
     seen: set[str] = set()
     result: list[dict[str, str]] = []
     for item in items:
-        category = str(item.get("category") or "").strip()
+        category = normalize_question_category(item.get("category") or "")
         question_text = redact_sensitive(str(item.get("questionText") or ""))
         focus = redact_sensitive(str(item.get("focus") or ""))
         rubric = redact_sensitive(str(item.get("rubric") or ""))
@@ -277,33 +562,34 @@ def generate_questions_by_ai(*, jd: dict[str, Any], resume_text: str) -> list[di
         limit=12,
     )
     resume_evidence = extract_evidence_segments(cleaned_resume, limit=12, min_length=10)
-    user_prompt = "\n".join(
-        [
-            "请基于以下输入生成结构化面试题：",
-            "",
-            f"岗位名称: {jd.get('title', '')}",
-            f"岗位必备技能: {json.dumps(jd.get('mustSkills', []), ensure_ascii=False, indent=2)}",
-            f"岗位加分技能: {json.dumps(jd.get('niceSkills', []), ensure_ascii=False, indent=2)}",
-            f"岗位职责: {jd.get('responsibilities', '')}",
-            "",
-            "JD关键证据片段（只能基于这些片段和结构化字段出题）:",
-            json.dumps(jd_evidence or ["(未提取到明确JD证据片段)"], ensure_ascii=False, indent=2),
-            "",
-            "原始JD全文:",
-            cleaned_jd_text or "(未提供原始JD全文)",
-            "",
-            "简历关键证据片段（只能基于这些片段追问候选人经历或真实性）:",
-            json.dumps(resume_evidence or ["(未提取到明确简历证据片段)"], ensure_ascii=False, indent=2),
-            "",
-            "候选人简历文本:",
-            cleaned_resume or "(未提供简历文本)",
-            "",
-            "硬性生成要求:",
-            "1. 每道题都必须能在上面的JD证据片段、简历证据片段或结构化字段中找到依据。",
-            "2. 不得使用输入中没有出现的岗位类别、业务制度、旺淡季、薪酬、渠道、组织背景。",
-            "3. 如果简历证据不足，不要脑补经历；改为围绕JD要求做真实性核验或补证据追问。",
-            "4. 优先使用输入中的原词或近义复述，不要泛化成通用HR/管理题。",
-        ]
+    resume_anchors = extract_resume_anchors(cleaned_resume, limit=8)
+    resume_anchor_tokens = collect_resume_anchor_tokens(
+        resume_anchors,
+        "\n".join(
+            [
+                str(jd.get("title") or "").strip(),
+                str(jd.get("responsibilities") or "").strip(),
+                json.dumps(jd.get("mustSkills") or [], ensure_ascii=False),
+                json.dumps(jd.get("niceSkills") or [], ensure_ascii=False),
+                cleaned_jd_text,
+            ]
+        ),
+    )
+    jd_gap_clues = collect_jd_gap_clues(jd, jd_evidence, cleaned_resume, limit=6)
+    required_resume_questions = 0
+    if cleaned_resume and resume_anchors:
+        required_resume_questions = 4 if len(resume_anchors) >= 2 else 2
+
+    user_prompt = build_question_user_prompt(
+        jd=jd,
+        cleaned_jd_text=cleaned_jd_text,
+        cleaned_resume=cleaned_resume,
+        jd_evidence=jd_evidence,
+        resume_evidence=resume_evidence,
+        resume_anchors=resume_anchors,
+        jd_gap_clues=jd_gap_clues,
+        required_resume_questions=required_resume_questions,
+        strict_resume_grounding=False,
     )
     raw = call_chat_completion(
         model=cfg["model_question"],
@@ -313,6 +599,54 @@ def generate_questions_by_ai(*, jd: dict[str, Any], resume_text: str) -> list[di
         retry_count=cfg["retry_count"],
     )
     questions = unique_questions(list(raw.get("questions") or []))
+    resume_grounded_count = count_resume_grounded_questions(questions, resume_anchor_tokens)
+    print(
+        "Question generation grounding:",
+        json.dumps(
+            {
+                "resumeEvidenceCount": len(resume_evidence),
+                "resumeAnchorCount": len(resume_anchors),
+                "requiredResumeQuestions": required_resume_questions,
+                "resumeGroundedCount": resume_grounded_count,
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    if required_resume_questions > 0 and resume_grounded_count < required_resume_questions:
+        strict_prompt = build_question_user_prompt(
+            jd=jd,
+            cleaned_jd_text=cleaned_jd_text,
+            cleaned_resume=cleaned_resume,
+            jd_evidence=jd_evidence,
+            resume_evidence=resume_evidence,
+            resume_anchors=resume_anchors,
+            jd_gap_clues=jd_gap_clues,
+            required_resume_questions=required_resume_questions,
+            strict_resume_grounding=True,
+        )
+        strict_raw = call_chat_completion(
+            model=cfg["model_question"],
+            system_prompt=system_prompt,
+            user_prompt=strict_prompt,
+            timeout_s=cfg["question_timeout_s"],
+            retry_count=cfg["retry_count"],
+        )
+        strict_questions = unique_questions(list(strict_raw.get("questions") or []))
+        strict_resume_grounded_count = count_resume_grounded_questions(strict_questions, resume_anchor_tokens)
+        print(
+            "Question generation grounding retry:",
+            json.dumps(
+                {
+                    "resumeGroundedCount": strict_resume_grounded_count,
+                    "questionCount": len(strict_questions),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        if strict_questions and strict_resume_grounded_count >= resume_grounded_count:
+            questions = strict_questions
+
     if not questions:
         raise RuntimeError("AI returned empty questions")
     return questions[:8]
