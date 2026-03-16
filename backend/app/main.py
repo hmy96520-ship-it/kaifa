@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .ai_client import evaluate_by_ai, generate_questions_by_ai, get_ai_status, suggest_followups_by_ai
+from .ai_client import evaluate_by_ai, generate_question_bundle_by_ai, get_ai_status, suggest_followups_by_ai
 from .asr_client import AliyunRealtimeAsrSession, get_asr_status
 from .config import get_settings
 from .db import db
@@ -227,6 +227,7 @@ def _serialize_question_task(task: dict[str, object]) -> dict[str, object]:
     if task.get("status") == "succeeded":
         payload["source"] = "ai"
         payload["questions"] = task.get("questions") or []
+        payload["generationMeta"] = task.get("generationMeta") or None
     return payload
 
 
@@ -287,7 +288,9 @@ async def _run_question_generation_task(task_id: str, job_id: int, jd: dict[str,
     task["updatedAt"] = _utc_now_iso()
 
     try:
-        questions = await asyncio.to_thread(generate_questions_by_ai, jd=jd, resume_text=resume_text)
+        bundle = await asyncio.to_thread(generate_question_bundle_by_ai, jd=jd, resume_text=resume_text)
+        questions = list(bundle.get("questions") or [])
+        generation_meta = bundle.get("meta") or None
         await asyncio.to_thread(_replace_question_bank, job_id, questions)
     except Exception as exc:
         task["status"] = "failed"
@@ -296,6 +299,7 @@ async def _run_question_generation_task(task_id: str, job_id: int, jd: dict[str,
         task["error"] = f"AI question generation failed: {exc}"
         task["questions"] = []
         task["count"] = 0
+        task["generationMeta"] = None
         return
 
     task["status"] = "succeeded"
@@ -304,6 +308,7 @@ async def _run_question_generation_task(task_id: str, job_id: int, jd: dict[str,
     task["error"] = None
     task["questions"] = questions
     task["count"] = len(questions)
+    task["generationMeta"] = generation_meta
 
 
 @app.post("/api/jobs")
@@ -334,13 +339,20 @@ async def generate_questions(job_id: int, request: Request):
     jd, resume_text = _build_question_generation_context(job_id, body)
 
     try:
-        questions = generate_questions_by_ai(jd=jd, resume_text=resume_text)
+        bundle = generate_question_bundle_by_ai(jd=jd, resume_text=resume_text)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"AI question generation failed: {exc}") from exc
 
+    questions = list(bundle.get("questions") or [])
     _replace_question_bank(job_id, questions)
 
-    return {"ok": True, "source": "ai", "count": len(questions), "questions": questions}
+    return {
+        "ok": True,
+        "source": "ai",
+        "count": len(questions),
+        "questions": questions,
+        "generationMeta": bundle.get("meta") or None,
+    }
 
 
 @app.post("/api/jobs/{job_id}/questions/generate-async")
@@ -360,6 +372,7 @@ async def generate_questions_async(job_id: int, request: Request):
         "error": None,
         "questions": [],
         "count": 0,
+        "generationMeta": None,
     }
 
     asyncio.create_task(_run_question_generation_task(task_id, job_id, jd, resume_text))

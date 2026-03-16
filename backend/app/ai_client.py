@@ -304,6 +304,60 @@ def count_resume_grounded_questions(questions: list[dict[str, Any]], anchor_toke
     return sum(1 for item in questions if question_references_resume_anchor(item, anchor_tokens))
 
 
+def match_resume_anchors_in_questions(questions: list[dict[str, Any]], resume_anchors: list[str]) -> list[str]:
+    matched: list[str] = []
+    for anchor in resume_anchors:
+        tokens = collect_resume_anchor_tokens([anchor], "")
+        if any(question_references_resume_anchor(question, tokens) for question in questions):
+            matched.append(anchor)
+    return matched
+
+
+def build_question_generation_meta(
+    *,
+    cleaned_resume: str,
+    resume_anchors: list[str],
+    jd_gap_clues: list[str],
+    questions: list[dict[str, Any]],
+    required_resume_questions: int,
+    retry_used: bool,
+) -> dict[str, Any]:
+    matched_resume_anchors = match_resume_anchors_in_questions(questions, resume_anchors)
+    resume_anchor_tokens = collect_resume_anchor_tokens(resume_anchors, "")
+    resume_grounded_count = count_resume_grounded_questions(questions, resume_anchor_tokens)
+    summary_parts: list[str] = []
+
+    if not cleaned_resume:
+        summary_parts.append("未提供简历，本次题库主要基于 JD 出题。")
+    elif matched_resume_anchors:
+        summary_parts.append(
+            f"题干已直接挂钩 {resume_grounded_count} 道简历题，命中的简历锚点包括：{', '.join(matched_resume_anchors[:3])}。"
+        )
+    elif resume_anchors:
+        summary_parts.append("已提取到简历锚点，但题干引用仍偏弱，本次以真实性核验和补证据追问为主。")
+    else:
+        summary_parts.append("简历中可直接引用的经历事实较少，本次题库以补证据和真实性核验题为主。")
+
+    if jd_gap_clues:
+        summary_parts.append(
+            f"对简历未直接覆盖的 JD 要求，已按“迁移能力/补证据”方式处理，例如：{', '.join(jd_gap_clues[:3])}。"
+        )
+
+    if retry_used:
+        summary_parts.append("系统检测到初版简历挂钩度不足，已自动重生成一版以提高题干对简历的引用。")
+
+    return {
+        "resumeProvided": bool(cleaned_resume),
+        "resumeAnchors": resume_anchors[:6],
+        "matchedResumeAnchors": matched_resume_anchors[:6],
+        "jdGapClues": jd_gap_clues[:6],
+        "resumeGroundedCount": resume_grounded_count,
+        "requiredResumeQuestions": required_resume_questions,
+        "retryUsed": retry_used,
+        "summary": " ".join(summary_parts).strip(),
+    }
+
+
 def build_question_user_prompt(
     *,
     jd: dict[str, Any],
@@ -543,7 +597,7 @@ def call_chat_completion(
             raise RuntimeError(str(exc) or exc.__class__.__name__) from exc
 
 
-def generate_questions_by_ai(*, jd: dict[str, Any], resume_text: str) -> list[dict[str, str]]:
+def generate_question_bundle_by_ai(*, jd: dict[str, Any], resume_text: str) -> dict[str, Any]:
     cfg = resolve_ai_config(get_settings())
     if not cfg["enabled"]:
         raise RuntimeError("AI is not enabled")
@@ -600,6 +654,7 @@ def generate_questions_by_ai(*, jd: dict[str, Any], resume_text: str) -> list[di
     )
     questions = unique_questions(list(raw.get("questions") or []))
     resume_grounded_count = count_resume_grounded_questions(questions, resume_anchor_tokens)
+    retry_used = False
     print(
         "Question generation grounding:",
         json.dumps(
@@ -646,10 +701,25 @@ def generate_questions_by_ai(*, jd: dict[str, Any], resume_text: str) -> list[di
         )
         if strict_questions and strict_resume_grounded_count >= resume_grounded_count:
             questions = strict_questions
+            retry_used = True
 
     if not questions:
         raise RuntimeError("AI returned empty questions")
-    return questions[:8]
+    final_questions = questions[:8]
+    generation_meta = build_question_generation_meta(
+        cleaned_resume=cleaned_resume,
+        resume_anchors=resume_anchors,
+        jd_gap_clues=jd_gap_clues,
+        questions=final_questions,
+        required_resume_questions=required_resume_questions,
+        retry_used=retry_used,
+    )
+    return {"questions": final_questions, "meta": generation_meta}
+
+
+def generate_questions_by_ai(*, jd: dict[str, Any], resume_text: str) -> list[dict[str, str]]:
+    bundle = generate_question_bundle_by_ai(jd=jd, resume_text=resume_text)
+    return list(bundle.get("questions") or [])
 
 
 def evaluate_by_ai(*, jd: dict[str, Any], transcript: str, resume_text: str, question_count: int) -> dict[str, Any]:

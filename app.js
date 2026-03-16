@@ -47,6 +47,7 @@ const state = {
   jd: null,
   jobId: null,
   questions: [],
+  questionGenerationMeta: null,
   transcript: "",
   assessment: null,
   assessmentSource: "rule",
@@ -85,6 +86,11 @@ const el = {
   resumeText: document.getElementById("resumeText"),
   generateBtn: document.getElementById("generateBtn"),
   generateStatus: document.getElementById("generateStatus"),
+  questionMeta: document.getElementById("questionMeta"),
+  questionMetaBadge: document.getElementById("questionMetaBadge"),
+  questionMetaSummary: document.getElementById("questionMetaSummary"),
+  questionMetaResumeAnchors: document.getElementById("questionMetaResumeAnchors"),
+  questionMetaJdGaps: document.getElementById("questionMetaJdGaps"),
   questionEmpty: document.getElementById("questionEmpty"),
   questionTable: document.getElementById("questionTable"),
   questionBody: document.getElementById("questionBody"),
@@ -454,6 +460,62 @@ function setGenerateStatus(text, tone = "idle") {
   if (tone === "loading") {
     el.generateStatus.classList.add("loading");
   }
+}
+
+function renderChipList(container, items, emptyText) {
+  container.innerHTML = "";
+  const values = Array.isArray(items) ? items.filter(Boolean) : [];
+
+  if (!values.length) {
+    const emptyChip = document.createElement("span");
+    emptyChip.className = "chip chip-muted";
+    emptyChip.textContent = emptyText;
+    container.appendChild(emptyChip);
+    return;
+  }
+
+  values.forEach((item) => {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.textContent = item;
+    container.appendChild(chip);
+  });
+}
+
+function renderQuestionGenerationMeta(meta) {
+  state.questionGenerationMeta = meta || null;
+
+  if (!meta) {
+    el.questionMeta.classList.add("hidden");
+    el.questionMetaSummary.textContent = "";
+    el.questionMetaBadge.textContent = "待生成";
+    el.questionMetaBadge.classList.remove("good", "bad", "loading");
+    el.questionMetaResumeAnchors.innerHTML = "";
+    el.questionMetaJdGaps.innerHTML = "";
+    return;
+  }
+
+  const resumeAnchors = Array.isArray(meta.matchedResumeAnchors) && meta.matchedResumeAnchors.length
+    ? meta.matchedResumeAnchors
+    : meta.resumeAnchors;
+  const groundedCount = Number(meta.resumeGroundedCount || 0);
+  const requiredCount = Number(meta.requiredResumeQuestions || 0);
+  const resumeProvided = Boolean(meta.resumeProvided);
+
+  el.questionMeta.classList.remove("hidden");
+  el.questionMetaSummary.textContent = meta.summary || "本次题库已结合 JD 与简历生成。";
+
+  if (!resumeProvided) {
+    setPillStatus(el.questionMetaBadge, "仅 JD", false, true);
+  } else if (groundedCount > 0) {
+    const targetCount = requiredCount > 0 ? requiredCount : groundedCount;
+    setPillStatus(el.questionMetaBadge, `简历挂钩 ${groundedCount}/${targetCount}`, true, false);
+  } else {
+    setPillStatus(el.questionMetaBadge, "简历挂钩偏弱", false, true);
+  }
+
+  renderChipList(el.questionMetaResumeAnchors, resumeAnchors, "未命中可展示的简历锚点");
+  renderChipList(el.questionMetaJdGaps, meta.jdGapClues, "简历已覆盖主要 JD 要求");
 }
 
 function setRecordingModeStatus(text, tone = "idle") {
@@ -1648,6 +1710,8 @@ el.generateBtn.addEventListener("click", async () => {
   const jd = collectJd();
   if (!jd) return;
 
+  renderQuestionGenerationMeta(null);
+
   setGenerateStatus("状态：检测后端中...", "loading");
   const ok = await checkBackend();
   if (!ok) {
@@ -1689,6 +1753,7 @@ el.generateBtn.addEventListener("click", async () => {
       focus: item.focus,
       rubric: item.rubric,
     }));
+    renderQuestionGenerationMeta(questionRes.generationMeta || null);
 
     state.currentQuestionIndex = state.questions.length ? 0 : null;
     resetFollowupState({ keepQuestion: state.currentQuestionIndex !== null });
@@ -1697,6 +1762,7 @@ el.generateBtn.addEventListener("click", async () => {
     setGenerateStatus(`状态：生成完成，共 ${state.questions.length} 题`, "good");
     alert(`题库生成成功，共 ${state.questions.length} 题（岗位ID: ${state.jobId}）`);
   } catch (error) {
+    renderQuestionGenerationMeta(null);
     setGenerateStatus(`状态：生成失败 - ${error.message}`, "bad");
     alert(`生成失败：${error.message}`);
   } finally {
@@ -1923,6 +1989,7 @@ checkBackend();
 renderFollowupState();
 resetAssessmentView();
 renderArchive();
+renderQuestionGenerationMeta(null);
 setGenerateStatus("状态：待生成");
 
 
