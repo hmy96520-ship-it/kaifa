@@ -37,10 +37,13 @@ curl http://localhost:3001/api/health
 
 ### 环境变量
 - `AI_PROVIDER=kimi|deepseek|qwen|glm|custom`
-- `AI_API_KEY=...`
+- `AI_API_KEY=...`（也支持直接使用 `OPENAI_API_KEY`）
 - `AI_BASE_URL=...`（provider 为 custom 时必填）
 - `AI_MODEL_QUESTION=...`
 - `AI_MODEL_EVAL=...`
+- `AI_WIRE_API=chat_completions|responses`
+- `AI_REASONING_EFFORT=low|medium|high|xhigh`（仅 `responses` 时生效）
+- `AI_DISABLE_RESPONSE_STORAGE=true|false`（仅 `responses` 时生效）
 
 ### 内置 provider 预设
 - `kimi` -> `https://api.moonshot.cn/v1`
@@ -52,6 +55,18 @@ curl http://localhost:3001/api/health
 - 题库生成接口调用模型。
 - 面试评估接口调用模型。
 - 实时追问建议接口调用模型。
+
+### OpenAI Responses 风格示例
+```env
+AI_PROVIDER=custom
+AI_BASE_URL=http://vivii.dpdns.org:58080
+AI_API_KEY=your_api_key_here
+AI_MODEL_QUESTION=gpt-5.4
+AI_MODEL_EVAL=gpt-5.4
+AI_WIRE_API=responses
+AI_REASONING_EFFORT=xhigh
+AI_DISABLE_RESPONSE_STORAGE=true
+```
 
 ## 7) 稳定转写（方案一）
 

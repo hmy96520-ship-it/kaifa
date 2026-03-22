@@ -506,6 +506,9 @@ def resolve_ai_config(settings: Settings) -> dict[str, Any]:
         "api_key": settings.ai_api_key,
         "model_question": model_question,
         "model_eval": model_eval,
+        "wire_api": settings.ai_wire_api or "chat_completions",
+        "reasoning_effort": settings.ai_reasoning_effort or "",
+        "disable_response_storage": settings.ai_disable_response_storage,
         "timeout_s": max(settings.ai_timeout_ms, 1000) / 1000,
         "question_timeout_s": max(settings.ai_timeout_question_ms, settings.ai_timeout_ms, 1000) / 1000,
         "retry_count": max(settings.ai_retry_count, 0),
@@ -523,10 +526,43 @@ def get_ai_status() -> dict[str, Any]:
         "modelQuestion": cfg["model_question"] or None,
         "modelEval": cfg["model_eval"] or None,
         "baseUrl": cfg["base_url"] or None,
+        "wireApi": cfg["wire_api"] or "chat_completions",
     }
 
 
-def call_chat_completion(
+def extract_text_from_responses_api(raw: dict[str, Any]) -> str:
+    output_text = raw.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    collected: list[str] = []
+    for item in list(raw.get("output") or []):
+        if not isinstance(item, dict):
+            continue
+        for content in list(item.get("content") or []):
+            if not isinstance(content, dict):
+                continue
+            text_value = content.get("text")
+            if isinstance(text_value, str) and text_value.strip():
+                collected.append(text_value.strip())
+                continue
+            if isinstance(text_value, dict):
+                nested_value = text_value.get("value")
+                if isinstance(nested_value, str) and nested_value.strip():
+                    collected.append(nested_value.strip())
+                    continue
+            if content.get("type") in {"output_text", "text"}:
+                nested_text = content.get("value")
+                if isinstance(nested_text, str) and nested_text.strip():
+                    collected.append(nested_text.strip())
+
+    if collected:
+        return "\n".join(collected).strip()
+
+    raise RuntimeError("AI empty content")
+
+
+def call_model(
     *,
     model: str,
     system_prompt: str,
@@ -543,17 +579,6 @@ def call_chat_completion(
     request_timeout_s = max(float(timeout_s or cfg["timeout_s"]), 1.0)
     retries = max(int(cfg["retry_count"] if retry_count is None else retry_count), 0)
 
-    payload: dict[str, Any] = {
-        "model": model,
-        "temperature": cfg["temperature"],
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-    if cfg["force_json"]:
-        payload["response_format"] = {"type": "json_object"}
-
     transport_timeout = httpx.Timeout(
         connect=min(request_timeout_s, 20.0),
         read=request_timeout_s,
@@ -563,8 +588,32 @@ def call_chat_completion(
 
     for attempt in range(retries + 1):
         try:
+            if cfg["wire_api"] == "responses":
+                payload = {
+                    "model": model,
+                    "instructions": system_prompt,
+                    "input": user_prompt,
+                }
+                if cfg["reasoning_effort"]:
+                    payload["reasoning"] = {"effort": cfg["reasoning_effort"]}
+                if cfg["disable_response_storage"]:
+                    payload["store"] = False
+                endpoint = f"{cfg['base_url']}/responses"
+            else:
+                payload = {
+                    "model": model,
+                    "temperature": cfg["temperature"],
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                }
+                if cfg["force_json"]:
+                    payload["response_format"] = {"type": "json_object"}
+                endpoint = f"{cfg['base_url']}/chat/completions"
+
             response = httpx.post(
-                f"{cfg['base_url']}/chat/completions",
+                endpoint,
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {cfg['api_key']}",
@@ -574,9 +623,12 @@ def call_chat_completion(
             )
             response.raise_for_status()
             raw = response.json()
-            content = (((raw.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
-            if not content:
-                raise RuntimeError("AI empty content")
+            if cfg["wire_api"] == "responses":
+                content = extract_text_from_responses_api(raw)
+            else:
+                content = (((raw.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+                if not content:
+                    raise RuntimeError("AI empty content")
             return parse_json_from_model_text(content)
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
@@ -645,7 +697,7 @@ def generate_question_bundle_by_ai(*, jd: dict[str, Any], resume_text: str) -> d
         required_resume_questions=required_resume_questions,
         strict_resume_grounding=False,
     )
-    raw = call_chat_completion(
+    raw = call_model(
         model=cfg["model_question"],
         system_prompt=system_prompt,
         user_prompt=user_prompt,
@@ -680,7 +732,7 @@ def generate_question_bundle_by_ai(*, jd: dict[str, Any], resume_text: str) -> d
             required_resume_questions=required_resume_questions,
             strict_resume_grounding=True,
         )
-        strict_raw = call_chat_completion(
+        strict_raw = call_model(
             model=cfg["model_question"],
             system_prompt=system_prompt,
             user_prompt=strict_prompt,
@@ -777,7 +829,7 @@ def evaluate_by_ai(*, jd: dict[str, Any], transcript: str, resume_text: str, que
             "5. 证据不足时，总分应保守，summary 必须明确写出“证据不足/需复核”的具体原因。",
         ]
     )
-    raw = call_chat_completion(model=cfg["model_eval"], system_prompt=system_prompt, user_prompt=user_prompt)
+    raw = call_model(model=cfg["model_eval"], system_prompt=system_prompt, user_prompt=user_prompt)
 
     suggestion = str(raw.get("suggestion") or "").strip()
     if suggestion not in {"建议录用", "建议复试", "不建议录用"}:
@@ -859,7 +911,7 @@ def suggest_followups_by_ai(
             "3. 如果回答已经完整，只返回空的 followupQuestions，不要硬造追问。",
         ]
     )
-    raw = call_chat_completion(model=cfg["model_eval"], system_prompt=system_prompt, user_prompt=user_prompt)
+    raw = call_model(model=cfg["model_eval"], system_prompt=system_prompt, user_prompt=user_prompt)
     return {
         "answerComplete": bool(raw.get("answerComplete")),
         "riskPoints": [redact_sensitive(str(item).strip()) for item in list(raw.get("riskPoints") or []) if str(item).strip()][:4],

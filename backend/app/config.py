@@ -26,6 +26,9 @@ class Settings:
     ai_api_key: str
     ai_model_question: str
     ai_model_eval: str
+    ai_wire_api: str
+    ai_reasoning_effort: str
+    ai_disable_response_storage: bool
     ai_timeout_ms: int
     ai_timeout_question_ms: int
     ai_retry_count: int
@@ -63,9 +66,12 @@ def get_settings() -> Settings:
         prompt_dir=BASE_DIR / "prompts",
         ai_provider=os.getenv("AI_PROVIDER", "").strip().lower(),
         ai_base_url=os.getenv("AI_BASE_URL", "").strip(),
-        ai_api_key=os.getenv("AI_API_KEY", "").strip(),
+        ai_api_key=(os.getenv("AI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip(),
         ai_model_question=os.getenv("AI_MODEL_QUESTION", "").strip(),
         ai_model_eval=os.getenv("AI_MODEL_EVAL", "").strip(),
+        ai_wire_api=os.getenv("AI_WIRE_API", "chat_completions").strip().lower(),
+        ai_reasoning_effort=os.getenv("AI_REASONING_EFFORT", "").strip().lower(),
+        ai_disable_response_storage=_to_bool(os.getenv("AI_DISABLE_RESPONSE_STORAGE"), False),
         ai_timeout_ms=int(os.getenv("AI_TIMEOUT_MS", "20000")),
         ai_timeout_question_ms=int(os.getenv("AI_TIMEOUT_QUESTION_MS", "240000")),
         ai_retry_count=max(int(os.getenv("AI_RETRY_COUNT", "1")), 0),
